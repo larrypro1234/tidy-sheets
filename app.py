@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 7
+VERSION = 8
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -621,6 +621,7 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
   <div class="amz" id="amz" hidden>
     <b>Amazon check</b>
     <button class="btn sm" id="scanBtn" type="button">Scan on Keepa</button>
+    <button class="btn sm ghost" id="refreshBtn" type="button" hidden title="Check today's Amazon price again for the products in Kept">Refresh prices</button>
     <button class="btn sm ghost" id="stopBtn" type="button" hidden>Stop</button>
     <span id="amzStatus" class="status" role="status"></span>
     <form id="keyForm" hidden><input id="keyIn" type="password" placeholder="Keepa API key" aria-label="Keepa API key" autocomplete="off"><button class="btn sm" type="submit">Save key</button></form>
@@ -969,7 +970,7 @@ function amzOf(r) {
   if (!k) return amz.map.size ? 0 : undefined; // no UPC: can't be matched on Amazon
   const e = amz.map.get(k);
   if (!e) return undefined;
-  return e.length === 1 ? 0 : { asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined };
+  return e.length === 1 ? 0 : { day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined };
 }
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
@@ -1052,13 +1053,14 @@ function renderAmzBar() {
   const bar = $("#amz");
   bar.hidden = !cur || !vendor;
   if (bar.hidden) return;
-  $("#scanBtn").hidden = !!scanning; $("#stopBtn").hidden = !scanning;
+  $("#scanBtn").hidden = !!scanning; $("#stopBtn").hidden = !scanning; $("#refreshBtn").hidden = true;
   if (scanning) return;
   if (cur.upj < 0) { $("#scanBtn").disabled = true; amzStatus("No UPC column in this file, so it can't be checked on Amazon."); return; }
   $("#scanBtn").disabled = false;
   const rows = cur.kept.filter(r => !bannedBy(r) && !isRejected(r)), states = rows.map(amzOf);
   const checked = states.filter(s => s !== undefined).length, on = states.filter(s => s && s.asin).length;
   const pass = rows.filter(r => { const s = amzOf(r); return s && s.asin && !failReason(r); }).length;
+  $("#refreshBtn").hidden = !pass; $("#refreshBtn").textContent = `Refresh prices (${n(pass)} in Kept)`;
   const noFees = states.filter(s => s && s.asin && s.sold === undefined).length;
   amzStatus(checked
     ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} pass: $${(MIN_AMZ_PRICE / 100).toFixed(2)}+, ${Math.round(MIN_ROI * 100)}%+ ROI, rank under ${n(MAX_RANK)}, ${MIN_SOLD}+ sold in a month</b>`
@@ -1067,8 +1069,9 @@ function renderAmzBar() {
     : `Checks each kept product's UPC on Keepa and keeps only the ones on Amazon at ${Math.round(MIN_ROI * 100)}%+ ROI.`);
   $("#keyChange").hidden = !keepaKey;
 }
-async function scan() {
+async function scan(refreshKept) {
   if (scanning || !cur || cur.upj < 0) return;
+  refreshKept = refreshKept === true;
   if (!(await loadKey())) { $("#keyForm").hidden = false; $("#keyIn").focus(); amzStatus("Paste your Keepa API key once. It's saved on this Mac."); return; }
   const todo = [], seenK = new Set();
   for (const r of cur.kept) {
@@ -1077,7 +1080,7 @@ async function scan() {
     if (!k || seenK.has(k)) continue;
     seenK.add(k);
     const e = amz.map.get(k);
-    if (!e || (e.length > 1 && e.length < 8)) todo.push({ k, raw }); // results never expire; only products never checked (or saved before fees and monthly sales were stored) are fetched
+    if (refreshKept ? (e && e.length > 1 && !failReason(r)) : (!e || (e.length > 1 && e.length < 8))) todo.push({ k, raw }); // results never expire; only products never checked (or saved before fees and monthly sales were stored) are fetched
   }
   if (!todo.length) { renderAmzBar(); amzStatus(($("#amzStatus").innerHTML) + " · all up to date"); return; }
   scanning = { stop: false }; renderAmzBar();
@@ -1104,7 +1107,11 @@ async function scan() {
       for (const p of j.products) {
         const codes = [...(p.upcList || []), ...(p.eanList || [])].map(normUpc);
         const st = p.stats || {}, curv = st.current || [];
-        const price = [st.buyBoxPrice, curv[0], curv[1]].find(v => typeof v === "number" && v > 0) || 0;
+        // The price you'd realistically sell at, erring low so ROI is never overstated: the lowest of the buy box,
+        // Amazon's own offer and the cheapest FBA offer. The cheapest new offer of any kind is only a last resort (it may add shipping).
+        const pos = v => typeof v === "number" && v > 0;
+        const main = [st.buyBoxPrice, curv[0], curv[10]].filter(pos);
+        const price = main.length ? Math.min(...main) : (pos(curv[1]) ? curv[1] : 0);
         const ref = [p.referralFeePercentage, p.referralFeePercent].find(v => typeof v === "number" && v > 0) ?? null;
         const fba = p.fbaFees && typeof p.fbaFees.pickAndPackFee === "number" && p.fbaFees.pickAndPackFee >= 0 ? p.fbaFees.pickAndPackFee : null;
         const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 80), ref, fba, bestMonth(p)];
@@ -1266,7 +1273,7 @@ function show() {
     const a = amzOf(r);
     if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
-    return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n">${money(a.price)}</td>`
+    return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
       + `<td class="n">${cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
       + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
@@ -1413,7 +1420,8 @@ $("#chips").addEventListener("click", e => {
   bans.splice(+b.dataset.i, 1); saveBans();
   if (cur) show();
 });
-$("#scanBtn").addEventListener("click", scan);
+$("#scanBtn").addEventListener("click", () => scan(false));
+$("#refreshBtn").addEventListener("click", () => scan(true));
 $("#stopBtn").addEventListener("click", () => { if (scanning) scanning.stop = true; });
 $("#keyChange").addEventListener("click", () => { $("#keyForm").hidden = false; $("#keyIn").value = ""; $("#keyIn").focus(); });
 $("#keyForm").addEventListener("submit", async e => {

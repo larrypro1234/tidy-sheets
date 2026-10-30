@@ -9,7 +9,8 @@ A small app for vendor inventory spreadsheets. Upload a vendor's file and it:
 - **Marks new products**: ones you haven't seen from that company before.
 - **Scan on Keepa**: checks each remaining UPC on Amazon and keeps only products that are on Amazon, at least $6.99, at least 40% ROI, a sales rank of 350,000 or better, and 50+ bought in at least one month of the past year (from Amazon's "bought in past month" figure). Products with no sales rank or no monthly sales are rejected.
   ROI = (Amazon price − referral fee − FBA fee − Low Sell) ÷ Low Sell, using each product's fees from Keepa (15% + $3.50 when Keepa has none).
-  Results never expire, so a product is only scanned once.
+  Amazon price = the lowest of the buy box, Amazon's own offer and the cheapest FBA offer, so ROI is never overstated.
+  Results never expire, so a product is only scanned once. **Refresh prices** re-checks just the products in Kept.
 - **Picks up where you left off**: the last uploaded file, its company and your tab come back after a refresh, an update or reopening the app.
 - **History**: every product in every uploaded file is recorded (UPC, company, date, our cost, qty, file). Click **History** and look up a UPC (any format, or part of one) or words from the product name to see every company that offered it and when.
 - **Reject products by hand**: the Reject button on any product hides it from that company for good, even when the same file comes again. The **You rejected** tab has an Undo button.
