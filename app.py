@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 6
+VERSION = 7
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -48,6 +48,9 @@ def db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.execute("CREATE TABLE IF NOT EXISTS docs (path TEXT PRIMARY KEY, json TEXT NOT NULL)")
+    # Every product every company offered: one row per UPC, company, upload day and file (re-uploading that file that day replaces it).
+    con.execute("CREATE TABLE IF NOT EXISTS offers (upc TEXT NOT NULL, upc_raw TEXT, vendor TEXT NOT NULL, vendor_name TEXT, "
+                "day TEXT NOT NULL, file TEXT NOT NULL, cost REAL, qty REAL, item TEXT, description TEXT, PRIMARY KEY (upc, vendor, day, file))")
     return con
 
 
@@ -72,6 +75,35 @@ def collection(path):
         rows = con.execute("SELECT path, json FROM docs WHERE path LIKE ? ESCAPE '\\'",
                            (path.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "/%",)).fetchall()
     return [{"id": p.rsplit("/", 1)[1], "data": json.loads(j)} for p, j in rows if p.count("/") == depth]
+
+
+def offers_save(b):
+    """Record one uploaded file's products. Rows from the same file and day are replaced, so picking a different company fixes it."""
+    rows = [(r["upc"], r.get("upc_raw"), b["vendor"], b.get("vendor_name"), b["day"], b.get("file") or "", r.get("cost"), r.get("qty"),
+             r.get("item"), r.get("description")) for r in b.get("rows", []) if r.get("upc")]
+    with DB_LOCK, db() as con:
+        con.execute("DELETE FROM offers WHERE file = ? AND day = ?", (b.get("file") or "", b["day"]))
+        con.executemany("INSERT OR REPLACE INTO offers VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    return len(rows)
+
+
+def offers_find(q):
+    """Look up by UPC (any format, or part of one) or by words in the product name."""
+    q = (q or "").strip()
+    digits = re.sub(r"\D", "", q)
+    if len(digits) >= 6 and len(digits) >= len(q.replace(" ", "")) - 2:
+        upc = digits.lstrip("0")
+        where, args = "upc = ? OR upc LIKE ?", [upc, f"%{upc}%"]
+    else:
+        words = [w for w in re.split(r"\s+", q) if w][:6]
+        if not words:
+            return []
+        where, args = " AND ".join("description LIKE ?" for _ in words), [f"%{w}%" for w in words]
+    with DB_LOCK, db() as con:
+        rows = con.execute(f"SELECT upc, upc_raw, vendor, vendor_name, day, file, cost, qty, item, description FROM offers "
+                           f"WHERE {where} ORDER BY day DESC, vendor_name LIMIT 300", args).fetchall()
+    keys = ["upc", "upc_raw", "vendor", "vendor_name", "day", "file", "cost", "qty", "item", "description"]
+    return [dict(zip(keys, r)) for r in rows]
 
 
 def doc_count():
@@ -349,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps({"data": doc_get(q.get("path", ""))}))
         elif url.path == "/api/col":
             self.send(json.dumps({"docs": collection(q.get("path", ""))}))
+        elif url.path == "/api/offers":
+            self.send(json.dumps({"rows": offers_find(q.get("q", ""))}))
         elif url.path == "/api/status":
             maybe_check_for_update()
             status = {"app": "tidy-sheets", "version": VERSION, "update_available": STATE["update_available"],
@@ -364,6 +398,8 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             doc_set(b["path"], b.get("data"))
             self.send('{"ok":true}')
+        elif url.path == "/api/offers":
+            self.send(json.dumps({"saved": offers_save(self.body())}))
         elif url.path == "/api/keepa":
             self.send(json.dumps(keepa_fetch(self.body().get("url", ""))))
         elif url.path == "/update":
@@ -516,6 +552,12 @@ td a { color: var(--accent); }
 .rowbtn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; }
 .rowbtn.rej { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
 .rowbtn:hover { background: var(--sunk); }
+.hist { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 12px; display: grid; gap: 10px; }
+.hist form { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; }
+.hist label { font-weight: 600; }
+.hist input { flex: 1 1 220px; min-width: 0; max-width: 360px; border: 1px solid var(--line); border-radius: var(--r); padding: 7px 10px; background: var(--bg); font: inherit; color: var(--ink); }
+.hist .note { margin: 0; color: var(--muted); }
+.hist .tbl { overflow: auto; max-height: 50vh; border: 1px solid var(--line); border-radius: var(--r); }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -541,6 +583,7 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
       <select id="vendorSel"></select>
       <form id="newVendor" hidden><input id="newName" placeholder="Company name" aria-label="Company name" autocomplete="off"><button class="btn sm" id="newSave" type="submit">Save company</button><button class="btn sm ghost" id="newCancel" type="button">Cancel</button></form>
     </div>
+    <button class="btn ghost sm" id="histBtn" type="button" aria-expanded="false">History</button>
     <button class="btn ghost sm" id="quit" type="button">Quit app</button>
     <label class="btn" for="file" id="topBtn" hidden>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></svg>
@@ -549,6 +592,15 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
   </header>
   <div class="banner-upd" id="update" hidden><b>A new version of Tidy Sheets is ready.</b><button class="btn sm" id="updbtn" type="button">Update now</button></div>
   <div class="banner-imp" id="imported" hidden></div>
+  <section class="hist" id="historyPanel" hidden>
+    <form id="histForm">
+      <label for="histQ">Look up a UPC or product</label>
+      <input id="histQ" placeholder="e.g. 071444299565 or play-doh" autocomplete="off">
+      <button class="btn sm" type="submit">Search</button>
+      <button class="btn sm ghost" id="histClose" type="button">Close</button>
+    </form>
+    <div id="histOut"><p class="note">Every product in every file you upload is recorded here: which company offered it, when, our cost and qty.</p></div>
+  </section>
   <input type="file" id="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.tsv,.txt,.numbers" hidden>
 
   <label class="drop" id="drop" for="file">
@@ -798,7 +850,7 @@ function makeDb() {
   return { doc: docRef, collection: colRef };
 }
 const dbP = Promise.resolve(makeDb());
-let sheets = [], active = 0, fileName = "", prefix = "", cur = null, hist = null, view = "kept";
+let sheets = [], active = 0, fileName = "", prefix = "", cur = null, hist = null, view = "kept", uploadDay = "";
 
 /* ---------- companies ---------- */
 // Each company is vendors/<key> {name, prefixes: [file-name starts that mean this company], ...}.
@@ -850,7 +902,7 @@ async function useVendor(v) {
   await loadBans(); await loadRejects(); await loadAmazon();
   hist = { status: "loading" }; show(); renderVendorBar();
   await remember(); show(); renderVendorBar();
-  rememberView(); saveSession();
+  rememberView(); saveSession(); recordOffers();
 }
 
 /* ---------- bans ---------- */
@@ -1236,7 +1288,7 @@ async function loadFile(f) {
       : XLSX.read(await f.arrayBuffer(), { type: "array" });
     const list = wb.SheetNames.map(s => ({ name: s, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
     if (!list.length) throw new Error("empty");
-    sheets = list; active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept";
+    sheets = list; active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept"; uploadDay = localDay();
   } catch (e) {
     $("#drop").hidden = false; $("#result").hidden = true; $("#info").hidden = true; $("#topBtn").hidden = true; $("#vendorBar").hidden = true; $("#bans").hidden = true; $("#amz").hidden = true;
     $("#dropText").innerHTML = `<span class="err">“${esc(f.name)}” couldn't be read.</span> Try an .xlsx, .xls, .ods or .csv file that isn't password-protected.`;
@@ -1250,7 +1302,7 @@ async function loadFile(f) {
   await loadBans(); await loadRejects(); await loadAmazon();
   compute(); hist = vendor ? { status: "loading" } : { status: "pick" }; show(); renderVendorBar();
   if (vendor) { await remember(); show(); renderVendorBar(); }
-  rememberView(); saveSession();
+  rememberView(); saveSession(); recordOffers();
 }
 
 /* ---------- picking up where you left off ---------- */
@@ -1258,7 +1310,7 @@ async function loadFile(f) {
 function saveSession() {
   const h = !hist || hist.status === "loading" ? null
     : hist.status === "ready" ? { status: "ready", first: hist.first, last: hist.last, fresh: [...hist.fresh] } : { status: hist.status };
-  dbP.then(db => db.doc("session/last").set({ fileName, prefix, active, sheets, vendor, hist: h })).catch(() => { /* next upload saves again */ });
+  dbP.then(db => db.doc("session/last").set({ fileName, prefix, active, sheets, vendor, hist: h, day: uploadDay })).catch(() => { /* next upload saves again */ });
 }
 function rememberView() { try { localStorage.setItem("tidyView", view); } catch (e) { /* tab choice only */ } }
 async function restoreSession() {
@@ -1266,6 +1318,7 @@ async function restoreSession() {
   try { s = (await (await dbP).doc("session/last").get()).data(); } catch (e) { return; }
   if (!s || !Array.isArray(s.sheets) || !s.sheets.length || cur) return;
   sheets = s.sheets; active = Math.min(s.active || 0, sheets.length - 1); fileName = s.fileName || ""; prefix = s.prefix || "";
+  uploadDay = s.day || localDay();
   await loadVendors();
   const v = s.vendor && vendors.find(x => x.key === s.vendor.key);
   vendor = v ? { key: v.key, name: v.name } : null;
@@ -1278,6 +1331,39 @@ async function restoreSession() {
   view = "kept";
   try { view = localStorage.getItem("tidyView") || "kept"; } catch (e) { /* default tab */ }
   show(); renderVendorBar();
+  recordOffers(); // the file that was open before History existed gets recorded too
+}
+
+/* ---------- history: where each UPC was offered ---------- */
+function descColumn(R) {
+  const t = R.cols.map((c, j) => j).filter(j => R.cols[j].type === "text");
+  return t.find(j => /\b(desc|description|title|product|item name|name)\b/i.test(R.cols[j].name)) ?? t.find(j => j !== cur.idj && j !== cur.upj) ?? -1;
+}
+function recordOffers() {
+  if (!vendor || !cur || cur.upj < 0) return;
+  const R = cur.R, dj = descColumn(R), num = v => typeof v === "number" ? v : null, rows = [];
+  for (const r of R.rows) {
+    const raw = String(r.val[cur.upj] ?? "").replace(/\D/g, ""), upc = normUpc(raw);
+    if (!upc) continue;
+    rows.push({ upc, upc_raw: raw.length === 11 ? "0" + raw : raw, cost: cur.cj >= 0 ? num(r.val[cur.cj]) : null, qty: cur.qj >= 0 ? num(r.val[cur.qj]) : null,
+      item: keyOf(r) || "", description: dj >= 0 && r.val[dj] != null ? String(r.val[dj]).slice(0, 200) : "" });
+  }
+  api("/api/offers", { vendor: vendor.key, vendor_name: vendor.name, day: uploadDay || localDay(), file: fileName, rows }).catch(() => { /* recorded next upload */ });
+}
+async function searchHistory() {
+  const q = $("#histQ").value.trim(), out = $("#histOut");
+  if (!q) return;
+  out.innerHTML = `<p class="note">Searching…</p>`;
+  let rows;
+  try { rows = (await api("/api/offers?q=" + encodeURIComponent(q))).rows; } catch (e) { out.innerHTML = `<p class="err">Couldn't search. Make sure the Tidy Sheets app is still running.</p>`; return; }
+  if (!rows.length) { out.innerHTML = `<p class="note">No offers found for “${esc(q)}”. Only files uploaded since this feature was added are recorded.</p>`; return; }
+  const companies = new Set(rows.map(r => r.vendor_name || r.vendor)), upcs = new Set(rows.map(r => r.upc));
+  const usd = v => v == null ? "" : "$" + Number(v).toFixed(2);
+  out.innerHTML = `<p class="note"><b>${n(rows.length)}</b> ${rows.length === 1 ? "offer" : "offers"} from <b>${n(companies.size)}</b> ${companies.size === 1 ? "company" : "companies"}${upcs.size > 1 ? ` across ${n(upcs.size)} products` : ""}${rows.length >= 300 ? " (showing the latest 300)" : ""}.</p>`
+    + `<div class="tbl"><table><thead><tr><th>Date</th><th>Company</th><th>Our cost</th><th>Qty</th><th>UPC</th><th>Product</th><th>File</th></tr></thead><tbody>`
+    + rows.map(r => `<tr><td class="d">${esc(r.day)}</td><td class="nw"><b>${esc(r.vendor_name || r.vendor)}</b></td><td class="n">${usd(r.cost)}</td><td class="n">${r.qty == null ? "" : n(r.qty)}</td>`
+      + `<td class="nw">${esc(r.upc_raw || r.upc)}</td><td class="w">${esc(r.description || "")}</td><td class="more" style="text-align:left">${esc(r.file || "")}</td></tr>`).join("")
+    + `</tbody></table></div>`;
 }
 
 /* ---------- events ---------- */
@@ -1361,6 +1447,12 @@ $("#updbtn").addEventListener("click", async () => {
   try { await api("/update", {}); } catch (e) { /* restarting */ }
   setTimeout(() => location.reload(), 4000);
 });
+$("#histBtn").addEventListener("click", () => {
+  const p = $("#historyPanel"); p.hidden = !p.hidden; $("#histBtn").setAttribute("aria-expanded", String(!p.hidden));
+  if (!p.hidden) $("#histQ").focus();
+});
+$("#histClose").addEventListener("click", () => { $("#historyPanel").hidden = true; $("#histBtn").setAttribute("aria-expanded", "false"); });
+$("#histForm").addEventListener("submit", e => { e.preventDefault(); searchHistory(); });
 $("#quit").addEventListener("click", async () => {
   try { await api("/quit", {}); } catch (e) { /* already off */ }
   document.body.innerHTML = '<div class="wrap"><h1 style="font-family:var(--font-display)">Tidy Sheets is turned off.</h1><p>Double-click the Tidy Sheets icon on your Desktop to open it again.</p></div>';
