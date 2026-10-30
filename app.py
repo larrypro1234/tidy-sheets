@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 4
+VERSION = 5
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -906,7 +906,7 @@ function renderBans() {
 
 /* ---------- Amazon check via Keepa ---------- */
 // Results are cached per company in vendors/<key>/amazon/<n> {codes: {upc: [day] | [day, asin, priceCents, rank, title]}}.
-const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, MAX_RANK = 350000, EST_REF_PCT = 15, EST_FBA = 350; // ROI and price floors; fallback fees in % and cents
+const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, MAX_RANK = 350000, MIN_SOLD = 50, EST_REF_PCT = 15, EST_FBA = 350; // ROI and price floors; fallback fees in % and cents
 const AMZ_CHUNK = 1500, BATCH = 20;
 let amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() }, keepaKey = null, keyLoaded = false, scanning = null;
 const normUpc = v => { const d = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
@@ -917,7 +917,7 @@ function amzOf(r) {
   if (!k) return amz.map.size ? 0 : undefined; // no UPC: can't be matched on Amazon
   const e = amz.map.get(k);
   if (!e) return undefined;
-  return e.length === 1 ? 0 : { asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null };
+  return e.length === 1 ? 0 : { asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined };
 }
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
@@ -943,9 +943,19 @@ function failReason(r) {
   if (a.price < MIN_AMZ_PRICE) return "Under $" + (MIN_AMZ_PRICE / 100).toFixed(2);
   if (!a.rank) return "No sales rank";
   if (a.rank > MAX_RANK) return "Rank over " + n(MAX_RANK);
+  if (a.sold !== undefined && !(a.sold >= MIN_SOLD)) return `Never ${MIN_SOLD}+ sold/month`;
   const e = econ(r);
   if (e && e.roi != null && e.roi < MIN_ROI) return "ROI " + Math.round(e.roi * 100) + "%";
   return null;
+}
+// Best month in the past year from Amazon's "bought in past month" figure (Keepa monthlySold and its history).
+const KEEPA_EPOCH_MIN = 21564000; // Keepa time is minutes since 2011-01-01
+function bestMonth(p) {
+  const since = Date.now() - 365 * 864e5;
+  let best = typeof p.monthlySold === "number" && p.monthlySold > 0 ? p.monthlySold : 0;
+  const h = Array.isArray(p.monthlySoldHistory) ? p.monthlySoldHistory : [];
+  for (let i = 0; i + 1 < h.length; i += 2) if ((h[i] + KEEPA_EPOCH_MIN) * 60000 >= since && h[i + 1] > best) best = h[i + 1];
+  return best;
 }
 async function loadAmazon() {
   amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() };
@@ -997,10 +1007,10 @@ function renderAmzBar() {
   const rows = cur.kept.filter(r => !bannedBy(r) && !isRejected(r)), states = rows.map(amzOf);
   const checked = states.filter(s => s !== undefined).length, on = states.filter(s => s && s.asin).length;
   const pass = rows.filter(r => { const s = amzOf(r); return s && s.asin && !failReason(r); }).length;
-  const noFees = states.filter(s => s && s.asin && s.ref == null && s.fba == null).length;
+  const noFees = states.filter(s => s && s.asin && s.sold === undefined).length;
   amzStatus(checked
-    ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} pass: $${(MIN_AMZ_PRICE / 100).toFixed(2)}+, ${Math.round(MIN_ROI * 100)}%+ ROI, rank under ${n(MAX_RANK)}</b>`
-      + (noFees ? ` · press Scan to get real Amazon fees for ${n(noFees)} products (estimates used until then)` : "")
+    ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} pass: $${(MIN_AMZ_PRICE / 100).toFixed(2)}+, ${Math.round(MIN_ROI * 100)}%+ ROI, rank under ${n(MAX_RANK)}, ${MIN_SOLD}+ sold in a month</b>`
+      + (noFees ? ` · press Scan to get fees and monthly sales for ${n(noFees)} products checked before` : "")
       + (cur.cj < 0 ? " · no cost column found, so ROI can't be worked out" : "")
     : `Checks each kept product's UPC on Keepa and keeps only the ones on Amazon at ${Math.round(MIN_ROI * 100)}%+ ROI.`);
   $("#keyChange").hidden = !keepaKey;
@@ -1015,7 +1025,7 @@ async function scan() {
     if (!k || seenK.has(k)) continue;
     seenK.add(k);
     const e = amz.map.get(k);
-    if (!e || (e.length > 1 && e.length < 7)) todo.push({ k, raw }); // results never expire; only products never checked (or saved before fees were stored) are fetched
+    if (!e || (e.length > 1 && e.length < 8)) todo.push({ k, raw }); // results never expire; only products never checked (or saved before fees and monthly sales were stored) are fetched
   }
   if (!todo.length) { renderAmzBar(); amzStatus(($("#amzStatus").innerHTML) + " · all up to date"); return; }
   scanning = { stop: false }; renderAmzBar();
@@ -1025,7 +1035,7 @@ async function scan() {
     for (let i = 0; i < todo.length && !scanning.stop; ) {
       const batch = todo.slice(i, i + BATCH);
       amzStatus(`Scanning on Keepa… ${n(done)} of ${n(todo.length)} · ${n(found)} on Amazon${tokens != null ? ` · ${n(tokens)} tokens left` : ""}`);
-      const url = `https://api.keepa.com/product?key=${encodeURIComponent(keepaKey)}&domain=1&history=0&stats=1&code=${batch.map(b => b.raw).join(",")}`;
+      const url = `https://api.keepa.com/product?key=${encodeURIComponent(keepaKey)}&domain=1&history=1&days=365&stats=1&code=${batch.map(b => b.raw).join(",")}`;
       const { status, j } = await keepaGet(url);
       if (!j) throw { code: "unreadable", detail: "HTTP " + status };
       if (typeof j.tokensLeft === "number") tokens = j.tokensLeft;
@@ -1045,10 +1055,10 @@ async function scan() {
         const price = [st.buyBoxPrice, curv[0], curv[1]].find(v => typeof v === "number" && v > 0) || 0;
         const ref = [p.referralFeePercentage, p.referralFeePercent].find(v => typeof v === "number" && v > 0) ?? null;
         const fba = p.fbaFees && typeof p.fbaFees.pickAndPackFee === "number" && p.fbaFees.pickAndPackFee >= 0 ? p.fbaFees.pickAndPackFee : null;
-        const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 80), ref, fba];
+        const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 80), ref, fba, bestMonth(p)];
         for (const c of codes) if (!hit.has(c)) hit.set(c, entry);
       }
-      if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 80), null, null]); }
+      if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 80), null, null, bestMonth(p)]); }
       for (const b of batch) { const e = hit.get(b.k); amzPut(b.k, e || [today]); if (e) found++; }
       done += batch.length; i += BATCH;
       show();
@@ -1202,15 +1212,15 @@ function show() {
   const usd = v => v == null ? "" : (v < 0 ? "-$" : "$") + Math.abs(v).toFixed(2);
   const amzTd = r => {
     const a = amzOf(r);
-    if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td>`;
+    if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
     return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n">${money(a.price)}</td>`
       + `<td class="n">${e ? usd(e.fees) + star : ""}</td><td class="n">${e ? usd(e.profit) : ""}</td>`
-      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td>`;
+      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
   const keepScroll = $("#sheet").scrollTop;
-  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>Amazon fees</th><th>Profit</th><th>ROI</th><th>Sales rank</th>" : ""}${R.cols.map(c => `<th>${esc(c.name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
-    `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${r.val.map((v, j) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${r.val.map(v => `<td>${esc(v ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>Amazon fees</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${R.cols.map(c => `<th>${esc(c.name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
+    `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${r.val.map((v, j) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${r.val.map(v => `<td>${esc(v ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
 
