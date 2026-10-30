@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 2
+VERSION = 3
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -513,6 +513,9 @@ td a { color: var(--accent); }
 .banner-upd, .banner-imp { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; border-radius: var(--r); padding: 10px 14px; }
 .banner-upd { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid var(--accent); }
 .banner-imp { background: color-mix(in srgb, var(--good) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--good) 40%, var(--line)); }
+.rowbtn { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 6px; padding: 2px 8px; font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+.rowbtn.rej { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--line)); }
+.rowbtn:hover { background: var(--sunk); }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -844,7 +847,7 @@ async function undoLast() {
 async function useVendor(v) {
   await undoLast();
   vendor = v; view = "kept";
-  await loadBans(); await loadAmazon();
+  await loadBans(); await loadRejects(); await loadAmazon();
   hist = { status: "loading" }; show(); renderVendorBar();
   await remember(); show(); renderVendorBar();
 }
@@ -852,6 +855,23 @@ async function useVendor(v) {
 /* ---------- bans ---------- */
 // Banned words and brands are kept per company, in bans/<key> {vendor, words: [...]}.
 let bans = [], banSaves = Promise.resolve(), banErr = "";
+// Products you rejected by hand stay hidden for that company: rejects/<key> {vendor, ids: {productId: day}}.
+let rejects = new Map(), rejectSaves = Promise.resolve();
+async function loadRejects() {
+  rejects = new Map();
+  if (!vendor) return;
+  try {
+    const s = await (await dbP).doc("rejects/" + vkey()).get();
+    const ids = s.exists && s.data().ids;
+    if (ids && typeof ids === "object") rejects = new Map(Object.entries(ids));
+  } catch (e) { /* show everything */ }
+}
+function saveRejects() {
+  const key = vkey(), name = vendor.name, ids = Object.fromEntries(rejects);
+  rejectSaves = rejectSaves.then(() => dbP).then(db => db.doc("rejects/" + key).set({ vendor: name, ids }))
+    .catch(() => { banErr = "Your rejected products couldn't be saved. Try again."; renderBans(); });
+}
+const isRejected = r => { const k = keyOf(r); return !!k && rejects.has(k); };
 async function loadBans() {
   bans = []; banErr = "";
   if (!vendor) return;
@@ -973,7 +993,7 @@ function renderAmzBar() {
   if (scanning) return;
   if (cur.upj < 0) { $("#scanBtn").disabled = true; amzStatus("No UPC column in this file, so it can't be checked on Amazon."); return; }
   $("#scanBtn").disabled = false;
-  const rows = cur.kept.filter(r => !bannedBy(r)), states = rows.map(amzOf);
+  const rows = cur.kept.filter(r => !bannedBy(r) && !isRejected(r)), states = rows.map(amzOf);
   const checked = states.filter(s => s !== undefined).length, on = states.filter(s => s && s.asin).length;
   const pass = rows.filter(r => { const s = amzOf(r); return s && s.asin && !failReason(r); }).length;
   const noFees = states.filter(s => s && s.asin && s.ref == null && s.fba == null).length;
@@ -989,7 +1009,7 @@ async function scan() {
   if (!(await loadKey())) { $("#keyForm").hidden = false; $("#keyIn").focus(); amzStatus("Paste your Keepa API key once. It's saved on this Mac."); return; }
   const todo = [], seenK = new Set();
   for (const r of cur.kept) {
-    if (bannedBy(r)) continue;
+    if (bannedBy(r) || isRejected(r)) continue;
     const digits = String(r.val[cur.upj] ?? "").replace(/\D/g, ""), raw = digits.length === 11 ? "0" + digits : digits, k = normUpc(raw); // 11 digits: a UPC that lost its leading zero
     if (!k || seenK.has(k)) continue;
     seenK.add(k);
@@ -1128,7 +1148,8 @@ async function remember() {
 function show() {
   const { R, qj, rejected } = cur;
   const why = new Map(); cur.kept.forEach(r => { const w = bannedBy(r); if (w) why.set(r, w); });
-  const keptAll = cur.kept.filter(r => !why.has(r)), banned = cur.kept.filter(r => why.has(r));
+  const mine = cur.kept.filter(r => !why.has(r) && isRejected(r));
+  const keptAll = cur.kept.filter(r => !why.has(r) && !isRejected(r)), banned = cur.kept.filter(r => why.has(r));
   const onOrUnchecked = keptAll.filter(r => amzOf(r) !== 0), notOn = keptAll.filter(r => amzOf(r) === 0);
   const failWhy = new Map(); onOrUnchecked.forEach(r => { const w = failReason(r); if (w) failWhy.set(r, w); });
   const byRoi = rows => rows.slice().sort((x, y) => { const a = econ(x), b = econ(y); return ((b && b.roi) ?? -1e9) - ((a && a.roi) ?? -1e9); });
@@ -1140,7 +1161,8 @@ function show() {
   if (view === "banned" && !banned.length) view = "kept";
   if (view === "noamz" && !notOn.length) view = "kept";
   if (view === "low" && !low.length) view = "kept";
-  let rows = view === "new" ? freshRows : view === "rejected" ? rejected : view === "banned" ? banned : view === "noamz" ? notOn : view === "low" ? low : [...freshRows, ...kept.filter(r => !isNew(r))];
+  if (view === "mine" && !mine.length) view = "kept";
+  let rows = view === "new" ? freshRows : view === "rejected" ? rejected : view === "banned" ? banned : view === "noamz" ? notOn : view === "low" ? low : view === "mine" ? mine : [...freshRows, ...kept.filter(r => !isNew(r))];
   $("#bans").hidden = !vendor;
   if (vendor) { $("#banLbl").textContent = `Ban a word or brand from ${vendor.name}`; renderBans(); }
   renderAmzBar();
@@ -1160,7 +1182,7 @@ function show() {
 
   const tab = (k, label, count) => `<button class="vtab" type="button" data-view="${k}" aria-pressed="${view === k}">${label} <span>${n(count)}</span></button>`;
   $("#info").innerHTML = `<div class="note">${note}</div>`
-    + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Rejected", rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}`
+    + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Under " + MIN_QTY, rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}${mine.length ? tab("mine", "You rejected", mine.length) : ""}`
     + `<span class="fname">${esc(fileName)}${qj < 0 ? " · no quantity column found, nothing rejected" : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`}</span></div>`;
 
   $("#tabs").hidden = sheets.length < 2;
@@ -1168,6 +1190,10 @@ function show() {
   if (!R.cols.length) { $("#sheet").innerHTML = `<div class="more">This sheet is empty.</div>`; return; }
   const cls = t => ["number", "currency", "percent"].includes(t) ? "n" : t === "date" ? "d" : "";
   const badge = view === "kept" && freshRows.length, reason = view === "banned" || view === "low";
+  const act = cur.idj >= 0 && ["kept", "new", "low", "noamz", "mine"].includes(view);
+  const actTd = r => { const k = keyOf(r); return !k ? "<td></td>" : view === "mine"
+    ? `<td><button class="rowbtn" type="button" data-undo="${esc(k)}">Undo</button></td>`
+    : `<td><button class="rowbtn rej" type="button" data-rej="${esc(k)}" title="Hide this product from ${esc(vendor ? vendor.name : "this company")} for good">Reject</button></td>`; };
   const reasonOf = r => view === "banned" ? why.get(r) : failWhy.get(r);
   const amzCols = (view === "kept" || view === "new" || view === "low") && rows.some(r => amzOf(r));
   const money = c => c ? "$" + (c / 100).toFixed(2) : "";
@@ -1180,8 +1206,10 @@ function show() {
       + `<td class="n">${e ? usd(e.fees) + star : ""}</td><td class="n">${e ? usd(e.profit) : ""}</td>`
       + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td>`;
   };
-  $("#sheet").innerHTML = `<table><thead><tr>${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>Amazon fees</th><th>Profit</th><th>ROI</th><th>Sales rank</th>" : ""}${R.cols.map(c => `<th>${esc(c.name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
-    `<tr>${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${r.val.map((v, j) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${r.val.map(v => `<td>${esc(v ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+  const keepScroll = $("#sheet").scrollTop;
+  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>Amazon fees</th><th>Profit</th><th>ROI</th><th>Sales rank</th>" : ""}${R.cols.map(c => `<th>${esc(c.name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
+    `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${r.val.map((v, j) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${r.val.map(v => `<td>${esc(v ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+  $("#sheet").scrollTop = keepScroll;
 }
 
 async function loadFile(f) {
@@ -1204,7 +1232,7 @@ async function loadFile(f) {
   await loadVendors();
   const match = prefix && vendors.find(v => v.prefixes.includes(prefix) || v.key === slug(prefix));
   vendor = match ? { key: match.key, name: match.name } : (!db ? { key: slug(prefix || "file"), name: prefix || "This file" } : null);
-  await loadBans(); await loadAmazon();
+  await loadBans(); await loadRejects(); await loadAmazon();
   compute(); hist = vendor ? { status: "loading" } : { status: "pick" }; show(); renderVendorBar();
   if (vendor) { await remember(); show(); renderVendorBar(); }
 }
@@ -1244,6 +1272,12 @@ $("#bans").addEventListener("submit", e => {
   if (!bans.some(b => b.toLowerCase() === w.toLowerCase())) { bans.push(w); saveBans(); }
   $("#banIn").value = "";
   if (cur) show();
+});
+$("#sheet").addEventListener("click", e => {
+  const b = e.target.closest("button[data-rej], button[data-undo]");
+  if (!b || !vendor) return;
+  if (b.dataset.rej) rejects.set(b.dataset.rej, localDay()); else rejects.delete(b.dataset.undo);
+  saveRejects(); show();
 });
 $("#chips").addEventListener("click", e => {
   const b = e.target.closest("button[data-i]"); if (!b) return;
