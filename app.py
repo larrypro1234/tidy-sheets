@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 1
+VERSION = 2
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -885,7 +885,7 @@ function renderBans() {
 
 /* ---------- Amazon check via Keepa ---------- */
 // Results are cached per company in vendors/<key>/amazon/<n> {codes: {upc: [day] | [day, asin, priceCents, rank, title]}}.
-const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, EST_REF_PCT = 15, EST_FBA = 350; // ROI and price floors; fallback fees in % and cents
+const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, MAX_RANK = 350000, EST_REF_PCT = 15, EST_FBA = 350; // ROI and price floors; fallback fees in % and cents
 const AMZ_CHUNK = 1500, BATCH = 20;
 let amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() }, keepaKey = null, keyLoaded = false, scanning = null;
 const normUpc = v => { const d = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
@@ -920,6 +920,8 @@ function failReason(r) {
   if (!a) return null;
   if (!a.price) return "No Amazon price";
   if (a.price < MIN_AMZ_PRICE) return "Under $" + (MIN_AMZ_PRICE / 100).toFixed(2);
+  if (!a.rank) return "No sales rank";
+  if (a.rank > MAX_RANK) return "Rank over " + n(MAX_RANK);
   const e = econ(r);
   if (e && e.roi != null && e.roi < MIN_ROI) return "ROI " + Math.round(e.roi * 100) + "%";
   return null;
@@ -976,7 +978,7 @@ function renderAmzBar() {
   const pass = rows.filter(r => { const s = amzOf(r); return s && s.asin && !failReason(r); }).length;
   const noFees = states.filter(s => s && s.asin && s.ref == null && s.fba == null).length;
   amzStatus(checked
-    ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} at ${Math.round(MIN_ROI * 100)}%+ ROI and $${(MIN_AMZ_PRICE / 100).toFixed(2)}+</b>`
+    ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} pass: $${(MIN_AMZ_PRICE / 100).toFixed(2)}+, ${Math.round(MIN_ROI * 100)}%+ ROI, rank under ${n(MAX_RANK)}</b>`
       + (noFees ? ` · press Scan to get real Amazon fees for ${n(noFees)} products (estimates used until then)` : "")
       + (cur.cj < 0 ? " · no cost column found, so ROI can't be worked out" : "")
     : `Checks each kept product's UPC on Keepa and keeps only the ones on Amazon at ${Math.round(MIN_ROI * 100)}%+ ROI.`);
@@ -1158,7 +1160,7 @@ function show() {
 
   const tab = (k, label, count) => `<button class="vtab" type="button" data-view="${k}" aria-pressed="${view === k}">${label} <span>${n(count)}</span></button>`;
   $("#info").innerHTML = `<div class="note">${note}</div>`
-    + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Rejected", rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Low ROI or price", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}`
+    + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Rejected", rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}`
     + `<span class="fname">${esc(fileName)}${qj < 0 ? " · no quantity column found, nothing rejected" : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`}</span></div>`;
 
   $("#tabs").hidden = sheets.length < 2;
