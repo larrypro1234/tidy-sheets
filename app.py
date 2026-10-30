@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 8
+VERSION = 9
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -558,6 +558,7 @@ td a { color: var(--accent); }
 .hist input { flex: 1 1 220px; min-width: 0; max-width: 360px; border: 1px solid var(--line); border-radius: var(--r); padding: 7px 10px; background: var(--bg); font: inherit; color: var(--ink); }
 .hist .note { margin: 0; color: var(--muted); }
 .hist .tbl { overflow: auto; max-height: 50vh; border: 1px solid var(--line); border-radius: var(--r); }
+.pill.dup { color: var(--muted); background: var(--sunk); letter-spacing: 0; cursor: help; }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -1169,14 +1170,40 @@ const keyOf = r => cur.idj < 0 || r.val[cur.idj] == null ? null : String(r.val[c
 const localDay = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 const niceDate = iso => { try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch (e) { return iso; } };
 
+// Some vendors list the same UPC more than once (different lots or IDs). Keep one row per UPC: a listing with
+// enough stock first, then the lowest cost, then the most stock. The others are kept on the row for the ×2 tag.
+function mergeSameUpc(R, upj, qj, cj) {
+  if (upj < 0) return 0;
+  const groups = new Map(), order = [];
+  for (const r of R.rows) {
+    const k = normUpc(r.val[upj]);
+    if (!k) { order.push(r); continue; }
+    if (groups.has(k)) groups.get(k).push(r); else { groups.set(k, [r]); order.push(k); }
+  }
+  const qty = r => qj >= 0 && typeof r.val[qj] === "number" ? r.val[qj] : -1;
+  const cost = r => cj >= 0 && typeof r.val[cj] === "number" ? r.val[cj] : Infinity;
+  let merged = 0;
+  R.rows = order.map(x => {
+    if (typeof x !== "string") return x;
+    const g = groups.get(x);
+    if (g.length === 1) return g[0];
+    const best = g.slice().sort((a, b) => (qty(b) >= MIN_QTY) - (qty(a) >= MIN_QTY) || cost(a) - cost(b) || qty(b) - qty(a))[0];
+    best.others = g.filter(r => r !== best);
+    merged += best.others.length;
+    return best;
+  });
+  return merged;
+}
 function compute() {
   const R = organize(sheets[active].aoa, OPTS);
-  const all = sortRows(R), qj = qtyColumn(R);
+  const qj = qtyColumn(R), upj = upcColumn(R), cj = costColumn(R);
+  const merged = mergeSameUpc(R, upj, qj, cj);
+  const all = sortRows(R);
   const low = r => !(typeof r.val[qj] === "number" && r.val[qj] >= MIN_QTY);
-  cur = { R, qj, kept: qj < 0 ? all : all.filter(r => !low(r)), rejected: qj < 0 ? [] : all.filter(low) };
+  cur = { R, qj, merged, kept: qj < 0 ? all : all.filter(r => !low(r)), rejected: qj < 0 ? [] : all.filter(low) };
   cur.idj = idColumn(R);
-  cur.upj = upcColumn(R);
-  cur.cj = costColumn(R);
+  cur.upj = upj;
+  cur.cj = cj;
 }
 
 /* ---------- remembering products ---------- */
@@ -1254,7 +1281,7 @@ function show() {
   const tab = (k, label, count) => `<button class="vtab" type="button" data-view="${k}" aria-pressed="${view === k}">${label} <span>${n(count)}</span></button>`;
   $("#info").innerHTML = `<div class="note">${note}</div>`
     + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Under " + MIN_QTY, rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}${mine.length ? tab("mine", "You rejected", mine.length) : ""}`
-    + `<span class="fname">${esc(fileName)}${qj < 0 ? " · no quantity column found, nothing rejected" : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`}</span></div>`;
+    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} duplicate listings combined` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`}</span></div>`;
 
   $("#tabs").hidden = sheets.length < 2;
   $("#tabs").innerHTML = sheets.map((s, i) => `<button class="tab" role="tab" type="button" data-i="${i}" aria-selected="${i === active}">${esc(s.name)}</button>`).join("");
@@ -1278,11 +1305,15 @@ function show() {
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
       + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
+  const dupTag = r => {
+    const line = x => [keyOf(x), cur.qj >= 0 && x.val[cur.qj] != null ? n(x.val[cur.qj]) + " in stock" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
+    return ` <span class="pill dup" title="Listed ${r.others.length + 1} times in this file. Showing ${esc(line(r))}. Also: ${esc(r.others.map(line).join("; "))}">×${r.others.length + 1}</span>`;
+  };
   const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0));
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
   $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>Our cost</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
-    `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => [r.val[j], j]).map(([v, j]) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+    `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => [r.val[j], j]).map(([v, j]) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
 
