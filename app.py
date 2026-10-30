@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 3
+VERSION = 4
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -850,6 +850,7 @@ async function useVendor(v) {
   await loadBans(); await loadRejects(); await loadAmazon();
   hist = { status: "loading" }; show(); renderVendorBar();
   await remember(); show(); renderVendorBar();
+  rememberView(); saveSession();
 }
 
 /* ---------- bans ---------- */
@@ -1175,7 +1176,8 @@ function show() {
   else if (!hist || hist.status === "loading") note = `Checking what you've already seen from ${vn}…`;
   else if (hist.status === "ready" && hist.first) note = `First file from ${vn}. Its products are saved, so next time only the new ones will be marked.`;
   else if (hist.status === "ready" && !hist.fresh.size) note = `Nothing new from ${vn} since your last upload on ${esc(niceDate(hist.last))}.`;
-  else if (hist.status === "ready") note = `<b class="ok">${n(hist.fresh.size)} new</b> from ${vn} since your last upload on ${esc(niceDate(hist.last))}.`;
+  else if (hist.status === "ready") note = `<b class="ok">${n(freshRows.length)} new</b> from ${vn} since your last upload on ${esc(niceDate(hist.last))}`
+    + (freshRows.length !== hist.fresh.size ? ` (${n(hist.fresh.size)} new in the file, ${n(hist.fresh.size - freshRows.length)} didn't pass your rules).` : ".");
   else if (hist.status === "noid") note = `Couldn't find a product ID column, so new products can't be tracked for this file.`;
   else if (hist.status === "off") note = `New-product tracking works when this page is opened in Claude while signed in.`;
   else note = `<span class="err">Couldn't load or save what you've seen from ${vn}.</span> Upload the file again to retry.`;
@@ -1235,6 +1237,34 @@ async function loadFile(f) {
   await loadBans(); await loadRejects(); await loadAmazon();
   compute(); hist = vendor ? { status: "loading" } : { status: "pick" }; show(); renderVendorBar();
   if (vendor) { await remember(); show(); renderVendorBar(); }
+  rememberView(); saveSession();
+}
+
+/* ---------- picking up where you left off ---------- */
+// The last uploaded file, its company and what was new are kept in session/last, so a refresh or an update shows the same sheet.
+function saveSession() {
+  const h = !hist || hist.status === "loading" ? null
+    : hist.status === "ready" ? { status: "ready", first: hist.first, last: hist.last, fresh: [...hist.fresh] } : { status: hist.status };
+  dbP.then(db => db.doc("session/last").set({ fileName, prefix, active, sheets, vendor, hist: h })).catch(() => { /* next upload saves again */ });
+}
+function rememberView() { try { localStorage.setItem("tidyView", view); } catch (e) { /* tab choice only */ } }
+async function restoreSession() {
+  let s = null;
+  try { s = (await (await dbP).doc("session/last").get()).data(); } catch (e) { return; }
+  if (!s || !Array.isArray(s.sheets) || !s.sheets.length || cur) return;
+  sheets = s.sheets; active = Math.min(s.active || 0, sheets.length - 1); fileName = s.fileName || ""; prefix = s.prefix || "";
+  await loadVendors();
+  const v = s.vendor && vendors.find(x => x.key === s.vendor.key);
+  vendor = v ? { key: v.key, name: v.name } : null;
+  await loadBans(); await loadRejects(); await loadAmazon();
+  if (cur) return; // a new file was uploaded meanwhile
+  compute();
+  hist = !vendor ? { status: "pick" }
+    : s.hist && s.hist.status === "ready" ? { ...s.hist, fresh: new Set(s.hist.fresh || []) }
+    : s.hist || { status: "ready", first: true, fresh: new Set() };
+  view = "kept";
+  try { view = localStorage.getItem("tidyView") || "kept"; } catch (e) { /* default tab */ }
+  show(); renderVendorBar();
 }
 
 /* ---------- events ---------- */
@@ -1295,8 +1325,8 @@ $("#keyForm").addEventListener("submit", async e => {
   try { const ref = await keyDoc(); if (ref) await ref.set({ key: k }); } catch (err) { amzStatus(`<span class="err">The key couldn't be saved, so you'll be asked again next time.</span>`); }
   scan();
 });
-$("#info").addEventListener("click", e => { const b = e.target.closest(".vtab"); if (b) { view = b.dataset.view; show(); } });
-$("#tabs").addEventListener("click", e => { const b = e.target.closest(".tab"); if (b) { active = +b.dataset.i; lastWrite = null; compute(); hist = vendor ? { status: "loading" } : { status: "pick" }; show(); if (vendor) remember().then(show); } });
+$("#info").addEventListener("click", e => { const b = e.target.closest(".vtab"); if (b) { view = b.dataset.view; rememberView(); show(); } });
+$("#tabs").addEventListener("click", e => { const b = e.target.closest(".tab"); if (b) { active = +b.dataset.i; lastWrite = null; compute(); hist = vendor ? { status: "loading" } : { status: "pick" }; show(); if (vendor) remember().then(() => { show(); saveSession(); }); else saveSession(); } });
 window.addEventListener("dragover", e => { e.preventDefault(); $("#drop").classList.add("over"); });
 window.addEventListener("dragleave", () => $("#drop").classList.remove("over"));
 window.addEventListener("drop", e => { e.preventDefault(); $("#drop").classList.remove("over"); loadFile(e.dataTransfer?.files?.[0]); });
@@ -1312,6 +1342,7 @@ async function pollStatus() {
   setTimeout(pollStatus, 60000);
 }
 pollStatus();
+restoreSession();
 $("#updbtn").addEventListener("click", async () => {
   $("#updbtn").disabled = true; $("#updbtn").textContent = "Updating…";
   try { await api("/update", {}); } catch (e) { /* restarting */ }
