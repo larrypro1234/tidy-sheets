@@ -13,6 +13,7 @@ A small app for vendor inventory spreadsheets. Upload a vendor's file and it:
   Amazon price = the lowest of the buy box, Amazon's own offer and the cheapest FBA offer, so ROI is never overstated.
   Results never expire, so a product is only scanned once. **Refresh prices** re-checks just the products in Kept.
 - **Picks up where you left off**: the last uploaded file, its company and your tab come back after a refresh, an update or reopening the app.
+- **Post to your public catalog**: the Post button on a product in Kept or New opens a box with the brand, Amazon photo (from Keepa, 1 token) and UPC filled in; type the price, MOQ and EXP and it is added as a new row to the catalog sheet. Only those fields are sent, never your cost or the vendor. One-time setup: a small Apps Script in the catalog sheet (Tidy Sheets shows the steps and the script). A UPC already in the catalog is not added twice.
 - **History**: every product in every uploaded file is recorded (UPC, company, date, our cost, qty, file). Click **History** and look up a UPC (any format, or part of one) or words from the product name to see every company that offered it and when.
 - **Reject products by hand**: the Reject button on any product hides it from that company for good, even when the same file comes again. The **You rejected** tab has an Undo button.
 

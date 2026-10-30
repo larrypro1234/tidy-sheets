@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 9
+VERSION = 10
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -285,6 +285,24 @@ def import_from_chrome():
 
 # ============================================================== KEEPA
 
+def catalog_post(url, payload):
+    """Send one product to the catalog sheet's Apps Script web app. Only script.google.com is allowed."""
+    if not re.match(r"^https://script\.google\.com/macros/s/[\w-]+/exec$", url or ""):
+        return {"ok": False, "error": "That isn't a Google Apps Script web app link (it should end in /exec)."}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:  # Google answers with a redirect to the result, which urllib follows
+            text = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"Google answered {e.code}. Check the web app link and that access is set to Anyone."}
+    except Exception as e:
+        return {"ok": False, "error": f"Couldn't reach Google ({e})."}
+    try:
+        return json.loads(text)
+    except Exception:
+        return {"ok": False, "error": "Google sent back a page instead of an answer. Check that the web app's access is set to Anyone."}
+
+
 def keepa_fetch(url):
     """Call the Keepa API for the page. Only api.keepa.com is allowed."""
     if not url.startswith("https://api.keepa.com/"):
@@ -400,6 +418,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send('{"ok":true}')
         elif url.path == "/api/offers":
             self.send(json.dumps({"saved": offers_save(self.body())}))
+        elif url.path == "/api/catalog":
+            b = self.body()
+            self.send(json.dumps(catalog_post(b.get("url", ""), b.get("payload") or {})))
         elif url.path == "/api/keepa":
             self.send(json.dumps(keepa_fetch(self.body().get("url", ""))))
         elif url.path == "/update":
@@ -559,6 +580,18 @@ td a { color: var(--accent); }
 .hist .note { margin: 0; color: var(--muted); }
 .hist .tbl { overflow: auto; max-height: 50vh; border: 1px solid var(--line); border-radius: var(--r); }
 .pill.dup { color: var(--muted); background: var(--sunk); letter-spacing: 0; cursor: help; }
+.steps-list { margin: 0; padding-left: 20px; display: grid; gap: 4px; max-width: 75ch; }
+.row-gap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+#catScript { width: 100%; min-height: 120px; font-family: var(--font-data); font-size: 12px; border: 1px solid var(--line); border-radius: var(--r); padding: 8px; background: var(--bg); color: var(--ink); }
+#catUrl { flex: 1 1 320px; min-width: 0; border: 1px solid var(--line); border-radius: var(--r); padding: 7px 10px; background: var(--bg); font: inherit; color: var(--ink); }
+.dlg-back { position: fixed; inset: 0; background: rgba(10, 16, 20, .45); display: grid; place-items: center; z-index: 20; padding: 16px; }
+.dlg { background: var(--surface); color: var(--ink); border-radius: 12px; padding: 18px; width: min(460px, 100%); display: grid; gap: 10px; box-shadow: 0 10px 40px rgba(0, 0, 0, .25); }
+.dlg-head { display: flex; gap: 12px; align-items: center; }
+.dlg-head img { width: 72px; height: 72px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; flex: none; }
+.dlg label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 10px; font-weight: 600; }
+.dlg input { border: 1px solid var(--line); border-radius: var(--r); padding: 7px 10px; background: var(--bg); font: inherit; font-weight: 400; color: var(--ink); min-width: 0; }
+.rowbtn.post { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); margin-left: 4px; }
+.pill.posted { margin-left: 4px; letter-spacing: 0; }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -593,6 +626,32 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
   </header>
   <div class="banner-upd" id="update" hidden><b>A new version of Tidy Sheets is ready.</b><button class="btn sm" id="updbtn" type="button">Update now</button></div>
   <div class="banner-imp" id="imported" hidden></div>
+  <section class="hist" id="catSetup" hidden>
+    <b>Connect your public catalog (one time)</b>
+    <ol class="steps-list">
+      <li>Open your catalog sheet and click <b>Extensions → Apps Script</b>.</li>
+      <li>Delete everything in the code box, then click <b>Copy script</b> below and paste it in. Click the <b>save</b> icon.</li>
+      <li>Click <b>Deploy → New deployment</b>. Click the gear next to "Select type" and pick <b>Web app</b>. Set <b>Execute as: Me</b> and <b>Who has access: Anyone</b>. Click <b>Deploy</b>.</li>
+      <li>Google asks for permission: click <b>Authorize access</b>, pick your account, then <b>Advanced → Go to … (unsafe)</b> → <b>Allow</b>. It's your own script.</li>
+      <li>Copy the <b>Web app URL</b> (it ends in /exec), paste it here and click <b>Save</b>.</li>
+    </ol>
+    <div class="row-gap"><button class="btn sm" id="catCopy" type="button">Copy script</button><span class="note" id="catCopyNote"></span></div>
+    <textarea id="catScript" readonly hidden aria-label="Catalog script"></textarea>
+    <form id="catForm" class="row-gap"><input id="catUrl" placeholder="https://script.google.com/macros/s/…/exec" aria-label="Web app URL" autocomplete="off"><button class="btn sm" type="submit">Save</button><button class="btn sm ghost" id="catClose" type="button">Close</button></form>
+    <p class="note" id="catNote"></p>
+  </section>
+  <div class="dlg-back" id="postDlg" hidden>
+    <form class="dlg" id="postForm">
+      <div class="dlg-head"><img id="pImg" alt="" hidden><div><b id="pTitle"></b><div class="note" id="pInfo"></div></div></div>
+      <label>Brand <input id="pBrand" autocomplete="off"></label>
+      <label>Price <input id="pPrice" inputmode="decimal" placeholder="e.g. 7.50" autocomplete="off" required></label>
+      <label>MOQ <input id="pMoq" inputmode="numeric" placeholder="e.g. 500" autocomplete="off"></label>
+      <label>EXP <input id="pExp" value="NA" autocomplete="off"></label>
+      <label>UPC <input id="pUpc" readonly></label>
+      <p class="note" id="pStatus" role="status"></p>
+      <div class="row-gap"><button class="btn sm" id="pGo" type="submit">Post to catalog</button><button class="btn sm ghost" id="pCancel" type="button">Cancel</button><button class="link" id="pSetup" type="button">Catalog settings</button></div>
+    </form>
+  </div>
   <section class="hist" id="historyPanel" hidden>
     <form id="histForm">
       <label for="histQ">Look up a UPC or product</label>
@@ -912,6 +971,130 @@ async function useVendor(v) {
 let bans = [], banSaves = Promise.resolve(), banErr = "";
 // Products you rejected by hand stay hidden for that company: rejects/<key> {vendor, ids: {productId: day}}.
 let rejects = new Map(), rejectSaves = Promise.resolve();
+/* ---------- posting to the public catalog ---------- */
+// The catalog sheet gets a small Apps Script web app (settings/catalog {url, secret}); posted UPCs are kept in catalog/posted.
+let catalog = null, posted = {}, postRow = null;
+async function loadCatalog() {
+  try {
+    const db = await dbP;
+    const c = await db.doc("settings/catalog").get(), p = await db.doc("catalog/posted").get();
+    catalog = c.exists ? c.data() : null;
+    posted = (p.exists && p.data().upcs) || {};
+  } catch (e) { /* not set up yet */ }
+  if (!catalog || !catalog.secret) {
+    catalog = { url: (catalog && catalog.url) || "", secret: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2) + Date.now()).replace(/-/g, "") };
+    (await dbP).doc("settings/catalog").set(catalog).catch(() => {});
+  }
+}
+const catalogReady = loadCatalog();
+function catalogScript() {
+  return `// Tidy Sheets → public catalog. Adds one product per request to the "Master List" sheet.
+const SECRET = "${catalog.secret}";
+const SHEET = "Master List";
+
+function doPost(e) {
+  const out = o => ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+  let d;
+  try { d = JSON.parse(e.postData.contents); } catch (err) { return out({ ok: false, error: "Bad request" }); }
+  if (d.secret !== SECRET) return out({ ok: false, error: "Wrong secret. Copy the script from Tidy Sheets again." });
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(SHEET) || ss.getSheets()[0];
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const width = sh.getLastColumn(), last = sh.getLastRow();
+    const head = sh.getRange(1, 1, 1, width).getValues()[0].map(h => String(h).replace(/[^A-Za-z]/g, "").toUpperCase());
+    const col = name => head.indexOf(name) + 1;
+    const clean = v => String(v || "").replace(/\\D/g, "").replace(/^0+/, "");
+    const upcCol = col("UPC");
+    if (upcCol && last > 1) {
+      const upcs = sh.getRange(2, upcCol, last - 1, 1).getDisplayValues().map(r => clean(r[0]));
+      const i = upcs.indexOf(clean(d.upc));
+      if (i >= 0) return out({ ok: false, duplicate: true, row: i + 2 });
+    }
+    const row = last + 1;
+    if (last >= 2) {
+      sh.getRange(last, 1, 1, width).copyTo(sh.getRange(row, 1, 1, width), SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+      sh.setRowHeight(row, sh.getRowHeight(last));
+    }
+    const put = (name, v) => { const c = col(name); if (c && v !== undefined && v !== null && v !== "") sh.getRange(row, c).setValue(v); };
+    put("BRAND", d.brand);
+    if (col("PHOTO") && d.image) {
+      try { sh.getRange(row, col("PHOTO")).setValue(SpreadsheetApp.newCellImage().setSourceUrl(d.image).build()); }
+      catch (err) { sh.getRange(row, col("PHOTO")).setFormula('=IMAGE("' + d.image + '")'); }
+    }
+    put("COST", Number(d.price));
+    put("MOQ", d.moq === "" ? "" : (isNaN(Number(d.moq)) ? d.moq : Number(d.moq)));
+    put("EXP", d.exp);
+    if (upcCol) sh.getRange(row, upcCol).setNumberFormat("@").setValue(String(d.upc));
+    return out({ ok: true, row: row });
+  } finally {
+    lock.releaseLock();
+  }
+}
+`;
+}
+async function openSetup(note) {
+  await catalogReady;
+  $("#catScript").value = catalogScript();
+  $("#catUrl").value = catalog.url || "";
+  $("#catNote").textContent = note || "";
+  $("#catSetup").hidden = false;
+  $("#catSetup").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function rowByKey(k) { return cur && cur.R.rows.find(r => keyOf(r) === k); }
+async function openPost(k) {
+  await catalogReady;
+  if (!catalog.url) return openSetup("Connect your catalog first. After that, the Post button sends products straight to it.");
+  const r = rowByKey(k);
+  if (!r) return;
+  postRow = r;
+  const R = cur.R, dj = descColumn(R), a = amzOf(r), raw = String(r.val[cur.upj] ?? "").replace(/\D/g, "");
+  const brandCol = R.cols.findIndex(c => /\bbrand\b/i.test(c.name));
+  $("#pTitle").textContent = dj >= 0 ? String(r.val[dj] || "") : "";
+  $("#pInfo").textContent = [cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? "Our cost $" + r.val[cur.cj].toFixed(2) : "", a && a.price ? "Amazon $" + (a.price / 100).toFixed(2) : "", a && a.asin ? a.asin : ""].filter(Boolean).join(" · ");
+  $("#pBrand").value = brandCol >= 0 && r.val[brandCol] ? String(r.val[brandCol]) : "";
+  $("#pPrice").value = ""; $("#pMoq").value = ""; $("#pExp").value = "NA";
+  $("#pUpc").value = raw.length === 11 ? "0" + raw : raw;
+  $("#pImg").hidden = true; $("#pImg").removeAttribute("src"); $("#pImg").dataset.url = "";
+  $("#pGo").disabled = false; $("#pStatus").textContent = "";
+  $("#postDlg").hidden = false;
+  $("#pPrice").focus();
+  // Photo and brand from Keepa (1 token).
+  if (await loadKey()) {
+    $("#pStatus").textContent = "Getting the photo and brand from Keepa…";
+    try {
+      const { j } = await keepaGet(`https://api.keepa.com/product?key=${encodeURIComponent(keepaKey)}&domain=1&history=0&code=${$("#pUpc").value}`);
+      const p = j && Array.isArray(j.products) && j.products[0];
+      if (postRow !== r) return;
+      if (p) {
+        const img = (Array.isArray(p.images) && p.images[0] && (p.images[0].l || p.images[0].m)) || String(p.imagesCSV || "").split(",")[0];
+        if (img) { const url = "https://m.media-amazon.com/images/I/" + img; $("#pImg").src = url; $("#pImg").dataset.url = url; $("#pImg").hidden = false; }
+        if (p.brand && !$("#pBrand").value) $("#pBrand").value = p.brand;
+      }
+      $("#pStatus").textContent = p ? "" : "Keepa had no photo for this UPC. You can still post it.";
+    } catch (e) { $("#pStatus").textContent = "Couldn't get the photo from Keepa. You can still post it."; }
+  }
+}
+async function sendPost(e) {
+  e.preventDefault();
+  const price = parseFloat($("#pPrice").value.replace(/[$,\s]/g, ""));
+  if (!(price > 0)) { $("#pStatus").innerHTML = `<span class="err">Type the price you want in the catalog.</span>`; $("#pPrice").focus(); return; }
+  $("#pGo").disabled = true; $("#pStatus").textContent = "Posting…";
+  const payload = { secret: catalog.secret, brand: $("#pBrand").value.trim(), image: $("#pImg").dataset.url || "", price, moq: $("#pMoq").value.trim(), exp: $("#pExp").value.trim() || "NA", upc: $("#pUpc").value };
+  let res;
+  try { res = await api("/api/catalog", { url: catalog.url, payload }); } catch (err) { res = { ok: false, error: "Couldn't reach the Tidy Sheets app. Is it still running?" }; }
+  const u = normUpc(payload.upc);
+  if (res.ok || res.duplicate) {
+    posted[u] = { day: localDay(), row: res.row || null, price };
+    (await dbP).doc("catalog/posted").set({ upcs: posted }).catch(() => {});
+  }
+  if (res.ok) { $("#postDlg").hidden = true; show(); return; }
+  $("#pGo").disabled = false;
+  $("#pStatus").innerHTML = res.duplicate ? `This UPC is already in your catalog (row ${esc(res.row)}). Marked as posted.` : `<span class="err">${esc(res.error || "Posting didn't work.")}</span>`;
+  if (res.duplicate) show();
+}
+
 async function loadRejects() {
   rejects = new Map();
   if (!vendor) return;
@@ -1289,9 +1472,17 @@ function show() {
   const cls = t => ["number", "currency", "percent"].includes(t) ? "n" : t === "date" ? "d" : "";
   const badge = view === "kept" && freshRows.length, reason = view === "banned" || view === "low";
   const act = cur.idj >= 0 && ["kept", "new", "low", "noamz", "mine"].includes(view);
+  const postBtn = r => {
+    if (!(view === "kept" || view === "new") || cur.upj < 0) return "";
+    const u = normUpc(r.val[cur.upj]);
+    if (!u) return "";
+    const done = posted[u];
+    return done ? `<span class="pill posted" title="Posted ${esc(done.day || "")}${done.row ? ", row " + done.row : ""}">Posted ✓</span>`
+      : `<button class="rowbtn post" type="button" data-post="${esc(keyOf(r))}">Post</button>`;
+  };
   const actTd = r => { const k = keyOf(r); return !k ? "<td></td>" : view === "mine"
     ? `<td><button class="rowbtn" type="button" data-undo="${esc(k)}">Undo</button></td>`
-    : `<td><button class="rowbtn rej" type="button" data-rej="${esc(k)}" title="Hide this product from ${esc(vendor ? vendor.name : "this company")} for good">Reject</button></td>`; };
+    : `<td class="nw"><button class="rowbtn rej" type="button" data-rej="${esc(k)}" title="Hide this product from ${esc(vendor ? vendor.name : "this company")} for good">Reject</button>${postBtn(r)}</td>`; };
   const reasonOf = r => view === "banned" ? why.get(r) : failWhy.get(r);
   const amzCols = (view === "kept" || view === "new" || view === "low") && rows.some(r => amzOf(r));
   const money = c => c ? "$" + (c / 100).toFixed(2) : "";
@@ -1441,6 +1632,8 @@ $("#bans").addEventListener("submit", e => {
   if (cur) show();
 });
 $("#sheet").addEventListener("click", e => {
+  const pb = e.target.closest("button[data-post]");
+  if (pb) return openPost(pb.dataset.post);
   const b = e.target.closest("button[data-rej], button[data-undo]");
   if (!b || !vendor) return;
   if (b.dataset.rej) rejects.set(b.dataset.rej, localDay()); else rejects.delete(b.dataset.undo);
@@ -1486,6 +1679,28 @@ $("#updbtn").addEventListener("click", async () => {
   try { await api("/update", {}); } catch (e) { /* restarting */ }
   setTimeout(() => location.reload(), 4000);
 });
+$("#postForm").addEventListener("submit", sendPost);
+$("#pCancel").addEventListener("click", () => { $("#postDlg").hidden = true; postRow = null; });
+$("#postDlg").addEventListener("click", e => { if (e.target.id === "postDlg") { $("#postDlg").hidden = true; postRow = null; } });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#postDlg").hidden) { $("#postDlg").hidden = true; postRow = null; } });
+$("#pSetup").addEventListener("click", () => { $("#postDlg").hidden = true; openSetup(); });
+$("#catCopy").addEventListener("click", async () => {
+  await catalogReady;
+  const text = catalogScript();
+  try { await navigator.clipboard.writeText(text); $("#catCopyNote").textContent = "Copied. Paste it into Apps Script."; $("#catScript").hidden = true; }
+  catch (err) { $("#catScript").hidden = false; $("#catScript").value = text; $("#catScript").select(); $("#catCopyNote").textContent = "Press Cmd+C to copy the selected script."; }
+});
+$("#catForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  const url = $("#catUrl").value.trim();
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) { $("#catNote").innerHTML = `<span class="err">That doesn't look right. Copy the Web app URL that ends in /exec.</span>`; return; }
+  await catalogReady;
+  catalog.url = url;
+  await (await dbP).doc("settings/catalog").set(catalog);
+  $("#catNote").textContent = "Saved. Click Post on any product to send it to your catalog.";
+  setTimeout(() => { $("#catSetup").hidden = true; }, 1500);
+});
+$("#catClose").addEventListener("click", () => { $("#catSetup").hidden = true; });
 $("#histBtn").addEventListener("click", () => {
   const p = $("#historyPanel"); p.hidden = !p.hidden; $("#histBtn").setAttribute("aria-expanded", String(!p.hidden));
   if (!p.hidden) $("#histQ").focus();
