@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 17
+VERSION = 18
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -597,7 +597,7 @@ td .rej { color: var(--bad); }
 .amz { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 12px; }
 .amz .status { color: var(--muted); font-size: 13.5px; }
 .amz form { display: flex; gap: 6px; flex-wrap: wrap; }
-.amz input { border: 1px solid var(--line); border-radius: var(--r); padding: 6px 10px; background: var(--bg); font: inherit; color: var(--ink); width: 240px; max-width: 100%; }
+.amz form input { border: 1px solid var(--line); border-radius: var(--r); padding: 6px 10px; background: var(--bg); font: inherit; color: var(--ink); width: 240px; max-width: 100%; }
 .btn[disabled] { opacity: .5; cursor: default; }
 td a { color: var(--accent); }
 .banner-upd, .banner-imp { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; border-radius: var(--r); padding: 10px 14px; }
@@ -632,7 +632,7 @@ td .sub { display: block; font-size: 11px; color: var(--muted); white-space: now
 td .packbtn { background: none; border: none; padding: 0; margin-left: auto; font: inherit; font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
 td .warn { color: var(--bad); font-weight: 600; }
 .offer-sw { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 500; cursor: pointer; }
-.offer-sw input { accent-color: var(--accent); }
+.offer-sw input { accent-color: var(--accent); width: auto; margin: 0; }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
