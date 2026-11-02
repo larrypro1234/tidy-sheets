@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 10
+VERSION = 11
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -825,7 +825,7 @@ function organize(aoa, o) {
   }
 
   if (o.types) cols.forEach((col, j) => {
-    if (/\b(upc|sku|ean|gtin|barcode|isbn|zip|phone)\b/i.test(col.name)) return; // codes stay exactly as written
+    if (/\b(upc|sku|ean|gtin|barcode|isbn|zip|phone)\b/i.test(col.name.replace(/_/g, " "))) return; // codes stay exactly as written
     const vals = body.map(r => r.val[j]).filter(v => v != null);
     if (!vals.length) return;
     let dmy = false;
@@ -840,7 +840,7 @@ function organize(aoa, o) {
       if (curs.length >= nums.length / 2) { col.type = "currency"; col.sym = mode(curs.map(p => p.cur)); }
       else if (nums.filter(p => p.pct).length >= nums.length / 2) col.type = "percent";
       else col.type = "number";
-      col.plain = /\b(id|code|zip|postcode|year|no|num|number|phone|ref)\b|#/i.test(col.name);
+      col.plain = /\b(id|code|zip|postcode|year|no|num|number|phone|ref)\b|#/i.test(col.name.replace(/_/g, " "));
       body.forEach(r => {
         const v = r.val[j]; const p = parseNum(v); if (!p) return;
         let n = p.n;
@@ -1050,7 +1050,7 @@ async function openPost(k) {
   if (!r) return;
   postRow = r;
   const R = cur.R, dj = descColumn(R), a = amzOf(r), raw = String(r.val[cur.upj] ?? "").replace(/\D/g, "");
-  const brandCol = R.cols.findIndex(c => /\bbrand\b/i.test(c.name));
+  const brandCol = R.cols.findIndex(c => /\bbrand\b/i.test(cname(c)));
   $("#pTitle").textContent = dj >= 0 ? String(r.val[dj] || "") : "";
   $("#pInfo").textContent = [cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? "Our cost $" + r.val[cur.cj].toFixed(2) : "", a && a.price ? "Amazon $" + (a.price / 100).toFixed(2) : "", a && a.asin ? a.asin : ""].filter(Boolean).join(" · ");
   $("#pBrand").value = brandCol >= 0 && r.val[brandCol] ? String(r.val[brandCol]) : "";
@@ -1147,7 +1147,9 @@ const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, MAX_RANK = 350000, MIN_SOLD = 50, EST
 const AMZ_CHUNK = 1500, BATCH = 20;
 let amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() }, keepaKey = null, keyLoaded = false, scanning = null;
 const normUpc = v => { const d = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
-function upcColumn(R) { return R.cols.findIndex(c => /\b(upc|ean|gtin|barcode)\b/i.test(c.name)); }
+// Column names compared with underscores as spaces, so "UPC_CD" and "AV_QTY" are recognized.
+const cname = c => String(c.name).replace(/_/g, " ");
+function upcColumn(R) { return R.cols.findIndex(c => /\b(upc|ean|gtin|barcode)\b/i.test(cname(c))); }
 function amzOf(r) {
   if (cur.upj < 0) return undefined;
   const k = normUpc(r.val[cur.upj]);
@@ -1159,7 +1161,7 @@ function amzOf(r) {
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
   const num = R.cols.map((c, j) => j).filter(j => ["number", "currency"].includes(R.cols[j].type));
-  const find = re => num.find(j => re.test(R.cols[j].name) && !/compar|retail|msrp|amazon|list/i.test(R.cols[j].name));
+  const find = re => num.find(j => re.test(cname(R.cols[j])) && !/compar|retail|msrp|amazon|list/i.test(cname(R.cols[j])));
   return find(/\blow ?sell\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
 }
 // Profit and ROI for one product: Amazon price minus referral fee, FBA fee and your cost.
@@ -1339,14 +1341,20 @@ function sortRows(R) {
 }
 function qtyColumn(R) {
   const num = R.cols.map((c, j) => j).filter(j => R.cols[j].type === "number");
-  return num.find(j => /\b(qty|quantity)\b/i.test(R.cols[j].name)) ?? num.find(j => /\b(available|on ?hand|stock|units|inventory)\b/i.test(R.cols[j].name)) ?? -1;
+  const nm = j => cname(R.cols[j]);
+  const notQty = /\b(so|sold|sales|order|ordered|orders|on order|po|min|moq|case|cs|inner|pack|pk|pallet|reserved|alloc|allocated|committed|incoming|backorder)\b/i;
+  const find = re => num.find(j => re.test(nm(j)) && !notQty.test(nm(j)));
+  return find(/\b(av|avl|avail|available)\b.*\b(qty|quantity)\b|\b(qty|quantity)\b.*\b(av|avl|avail|available)\b/i)  // "AV QTY", "Qty. Available"
+    ?? find(/\b(available|in ?stock|on ?hand)\b/i)                                                                         // "IN STOCK", "On Hand"
+    ?? find(/\b(qty|quantity)\b/i)
+    ?? find(/\b(stock|units|inventory)\b/i) ?? -1;
 }
 // The column that names each product: an ID-like column whose values are (nearly) all filled and different.
 function idColumn(R) {
   const ok = j => { const v = R.rows.map(r => r.val[j]).filter(x => x != null); return v.length >= R.rows.length * 0.95 && new Set(v.map(String)).size >= v.length * 0.95; };
   const js = R.cols.map((c, j) => j);
-  return js.find(j => /\b(id|sku|item|product ?(no|number|#)|part)\b|#/i.test(R.cols[j].name) && ok(j))
-    ?? js.find(j => /\b(upc|ean|gtin|barcode|code)\b/i.test(R.cols[j].name) && ok(j))
+  return js.find(j => /\b(id|sku|item|product ?(no|number|#)|part)\b|#/i.test(cname(R.cols[j])) && ok(j))
+    ?? js.find(j => /\b(upc|ean|gtin|barcode|code)\b/i.test(cname(R.cols[j])) && ok(j))
     ?? js.find(j => R.cols[j].type === "text" && ok(j)) ?? -1;
 }
 const keyOf = r => cur.idj < 0 || r.val[cur.idj] == null ? null : String(r.val[cur.idj] instanceof Date ? isoD(r.val[cur.idj]) : r.val[cur.idj]).trim().toUpperCase();
@@ -1515,6 +1523,14 @@ async function loadFile(f) {
     const wb = ["csv", "tsv", "txt"].includes(ext)
       ? XLSX.read(await f.text(), { type: "string", raw: true })
       : XLSX.read(await f.arrayBuffer(), { type: "array" });
+    // Long whole numbers (UPCs stored as numbers) are read in full: Excel may display them as 8.15766E+11, which drops digits.
+    for (const name of wb.SheetNames) {
+      const ws = wb.Sheets[name];
+      for (const addr in ws) {
+        const c = ws[addr];
+        if (addr[0] !== "!" && c && c.t === "n" && Number.isInteger(c.v) && Math.abs(c.v) >= 1e9) c.w = String(c.v);
+      }
+    }
     const list = wb.SheetNames.map(s => ({ name: s, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
     if (!list.length) throw new Error("empty");
     sheets = list; active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept"; uploadDay = localDay();
@@ -1566,7 +1582,7 @@ async function restoreSession() {
 /* ---------- history: where each UPC was offered ---------- */
 function descColumn(R) {
   const t = R.cols.map((c, j) => j).filter(j => R.cols[j].type === "text");
-  return t.find(j => /\b(desc|description|title|product|item name|name)\b/i.test(R.cols[j].name)) ?? t.find(j => j !== cur.idj && j !== cur.upj) ?? -1;
+  return t.find(j => /\b(desc|description|title|product|item name|name)\b/i.test(cname(R.cols[j]))) ?? t.find(j => j !== cur.idj && j !== cur.upj) ?? -1;
 }
 function recordOffers() {
   if (!vendor || !cur || cur.upj < 0) return;
