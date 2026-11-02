@@ -2,6 +2,7 @@
 
 A small app for vendor inventory spreadsheets. Upload a vendor's file and it:
 
+- **Shows product pictures** that suppliers put in their sheets (a Photo column; hover to enlarge), and long web links as short clickable links.
 - **Cleans it up**: finds the header row, removes blank rows, duplicates and totals rows, trims spaces, and reads numbers, prices and dates.
 - **Offer mode**: for suppliers who want you to name a price. Instead of ROI on their cost, the app shows **Max offer**: the most to pay per unit for 40% ROI ((Amazon price − fees) ÷ 1.40, divided by the pack size of the Amazon listing). On by itself when a file has no price column; the Offer mode switch turns it on for any file.
 - **One row per UPC**: when a vendor lists the same UPC more than once at the same price (for example at several warehouses), the quantities are added up and the row is marked "×3 added" (hover to see each location). At different prices, the app keeps the listing with enough stock and the lowest cost, marked ×2, ×3…

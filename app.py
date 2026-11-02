@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 18
+VERSION = 19
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -633,6 +633,10 @@ td .packbtn { background: none; border: none; padding: 0; margin-left: auto; fon
 td .warn { color: var(--bad); font-weight: 600; }
 .offer-sw { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 500; cursor: pointer; }
 .offer-sw input { accent-color: var(--accent); width: auto; margin: 0; }
+td.ph { width: 1%; padding: 4px 6px; }
+td.ph img { width: 56px; height: 56px; object-fit: contain; background: #fff; border: 1px solid var(--line); border-radius: 6px; display: block; transition: transform .15s; }
+td.ph img:hover { transform: scale(3); transform-origin: left center; position: relative; z-index: 5; box-shadow: 0 6px 24px rgba(0, 0, 0, .25); }
+@media (prefers-reduced-motion: reduce) { td.ph img { transition: none; } }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -1638,21 +1642,82 @@ function show() {
     const line = x => [keyOf(x), cur.units(x) != null ? n(cur.units(x)) + " units" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
     return ` <span class="pill dup" title="Listed ${r.others.length + 1} times in this file. Showing ${esc(line(r))}. Also: ${esc(r.others.map(line).join("; "))}">×${r.others.length + 1}</span>`;
   };
-  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0));
+  const pics = (sheets[active] && sheets[active].images) || {}, hasPics = Object.keys(pics).length > 0;
+  const emptyPicCol = j => /\b(image|images|photo|picture|pic|img)\b/i.test(cname(R.cols[j])) && R.rows.filter(r => r.val[j] != null && r.val[j] !== "").length <= R.rows.length * 0.1;
+  const photoTd = r => `<td class="ph">${pics[r.src] ? `<img src="${pics[r.src]}" alt="">` : ""}</td>`;
+  const cellHtml = (v, j) => {
+    if (typeof v === "string" && /^https?:\/\/\S+$/i.test(v)) {
+      let host = "link";
+      try { host = new URL(v).hostname.replace(/^www\./, ""); } catch (e) { /* keep "link" */ }
+      return `<a href="${esc(v)}" target="_blank" rel="noopener">${esc(host)}</a>`;
+    }
+    return esc(fmt(v, R.cols[j]));
+  };
+  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0) && !(hasPics && emptyPicCol(j)));
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
-  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
-    `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => [r.val[j], j]).map(([v, j]) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${hasPics ? "<th>Photo</th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
+    `<tr>${act ? actTd(r) : ""}${hasPics ? photoTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => [r.val[j], j]).map(([v, j]) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${cellHtml(v, j)}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${hasPics ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
 
+// Product pictures that float over a sheet (Excel drawings), keyed by the sheet row they sit on (1 = first row read).
+function sheetPictures(buf, wb) {
+  const out = {}, REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  let zip;
+  try { zip = XLSX.CFB.read(new Uint8Array(buf), { type: "array" }); } catch (e) { return out; }
+  const at = new Map(zip.FullPaths.map((p, i) => [p.replace(/^Root Entry\//, "").toLowerCase(), i]));
+  const bytes = p => { const i = at.get(p.toLowerCase()), c = i == null ? null : zip.FileIndex[i].content; return c ? (c instanceof Uint8Array ? c : new Uint8Array(c)) : null; };
+  const xml = p => { const b = bytes(p); return b ? new DOMParser().parseFromString(new TextDecoder().decode(b), "application/xml") : null; };
+  const rels = p => {
+    const d = xml(p.replace(/([^/]+)$/, "_rels/$1.rels")), m = {};
+    if (d) for (const r of d.getElementsByTagNameNS("*", "Relationship")) m[r.getAttribute("Id")] = { target: r.getAttribute("Target") || "", type: r.getAttribute("Type") || "" };
+    return m;
+  };
+  const resolve = (base, t) => {
+    if (t.startsWith("/")) return t.slice(1);
+    const parts = base.split("/"); parts.pop();
+    for (const seg of t.split("/")) { if (seg === "..") parts.pop(); else if (seg && seg !== ".") parts.push(seg); }
+    return parts.join("/");
+  };
+  const b64 = u8 => { let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+  const TYPES = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp" };
+  try {
+    const book = xml("xl/workbook.xml"), bookRels = rels("xl/workbook.xml");
+    if (!book) return out;
+    for (const sh of book.getElementsByTagNameNS("*", "sheet")) {
+      const name = sh.getAttribute("name"), rel = bookRels[sh.getAttributeNS(REL, "id") || sh.getAttribute("r:id")];
+      if (!rel || !wb.Sheets[name]) continue;
+      const sheetPath = resolve("xl/workbook.xml", rel.target), ref = wb.Sheets[name]["!ref"];
+      const start = ref ? XLSX.utils.decode_range(ref).s.r : 0, found = {};
+      for (const d of Object.values(rels(sheetPath)).filter(x => /\/drawing$/.test(x.type))) {
+        const dPath = resolve(sheetPath, d.target), dRels = rels(dPath), doc = xml(dPath);
+        if (!doc) continue;
+        for (const kind of ["oneCellAnchor", "twoCellAnchor"]) for (const a of doc.getElementsByTagNameNS("*", kind)) {
+          const from = a.getElementsByTagNameNS("*", "from")[0], blip = a.getElementsByTagNameNS("*", "blip")[0];
+          const rowEl = from && from.getElementsByTagNameNS("*", "row")[0];
+          if (!rowEl || !blip) continue;
+          const media = dRels[blip.getAttributeNS(REL, "embed") || blip.getAttribute("r:embed")];
+          if (!media) continue;
+          const mPath = resolve(dPath, media.target), type = TYPES[mPath.split(".").pop().toLowerCase()], b = type && bytes(mPath);
+          const row = +rowEl.textContent - start + 1;
+          if (b && !found[row]) found[row] = "data:" + type + ";base64," + b64(b);
+        }
+      }
+      if (Object.keys(found).length) out[name] = found;
+    }
+  } catch (e) { /* show the sheet without pictures */ }
+  return out;
+}
 async function loadFile(f) {
   if (!f) return;
   const ext = (f.name.split(".").pop() || "").toLowerCase();
+  let buf = null;
   try {
     const wb = ["csv", "tsv", "txt"].includes(ext)
       ? XLSX.read(await f.text(), { type: "string", raw: true })
-      : XLSX.read(await f.arrayBuffer(), { type: "array" });
+      : XLSX.read(buf = await f.arrayBuffer(), { type: "array" });
+    const pics = buf ? sheetPictures(buf, wb) : {};
     // Long whole numbers (UPCs stored as numbers) are read in full: Excel may display them as 8.15766E+11, which drops digits.
     for (const name of wb.SheetNames) {
       const ws = wb.Sheets[name];
@@ -1661,7 +1726,7 @@ async function loadFile(f) {
         if (addr[0] !== "!" && c && c.t === "n" && Number.isInteger(c.v) && Math.abs(c.v) >= 1e9) c.w = String(c.v);
       }
     }
-    const list = wb.SheetNames.map(s => ({ name: s, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
+    const list = wb.SheetNames.map(s => ({ name: s, images: pics[s] || null, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
     if (!list.length) throw new Error("empty");
     sheets = list; active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept"; uploadDay = localDay();
   } catch (e) {
