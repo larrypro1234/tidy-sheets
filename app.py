@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 12
+VERSION = 13
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -303,6 +303,32 @@ def catalog_post(url, payload):
         return {"ok": False, "error": "Google sent back a page instead of an answer. Check that the web app's access is set to Anyone."}
 
 
+DOWNLOADS = Path.home() / "Downloads"
+SHEET_TYPES = {".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".ods"}
+
+
+def recent_downloads(days=7, limit=8):
+    """Spreadsheets saved to Downloads in the last week, newest first."""
+    try:
+        files = [f for f in DOWNLOADS.iterdir()
+                 if f.is_file() and f.suffix.lower() in SHEET_TYPES and not f.name.startswith(("~$", "."))]
+    except PermissionError:
+        return {"error": "no_access", "files": []}
+    except FileNotFoundError:
+        return {"files": []}
+    since = time.time() - days * 86400
+    files = sorted((f for f in files if f.stat().st_mtime >= since), key=lambda f: f.stat().st_mtime, reverse=True)[:limit]
+    return {"files": [{"name": f.name, "size": f.stat().st_size, "mtime": f.stat().st_mtime} for f in files]}
+
+
+def download_bytes(name):
+    """One spreadsheet straight from Downloads (no folders, only spreadsheet types)."""
+    f = DOWNLOADS / name
+    if "/" in name or "\\" in name or name.startswith(".") or f.suffix.lower() not in SHEET_TYPES or not f.is_file():
+        return None
+    return f.read_bytes()
+
+
 def keepa_fetch(url):
     """Call the Keepa API for the page. Only api.keepa.com is allowed."""
     if not url.startswith("https://api.keepa.com/"):
@@ -401,6 +427,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps({"docs": collection(q.get("path", ""))}))
         elif url.path == "/api/offers":
             self.send(json.dumps({"rows": offers_find(q.get("q", ""))}))
+        elif url.path == "/api/downloads":
+            self.send(json.dumps(recent_downloads()))
+        elif url.path == "/api/download":
+            data = download_bytes(q.get("name", ""))
+            if data is None:
+                return self.send_error(404)
+            self.send(data, "application/octet-stream")
         elif url.path == "/api/status":
             maybe_check_for_update()
             status = {"app": "tidy-sheets", "version": VERSION, "update_available": STATE["update_available"],
@@ -592,6 +625,9 @@ td a { color: var(--accent); }
 .dlg input { border: 1px solid var(--line); border-radius: var(--r); padding: 7px 10px; background: var(--bg); font: inherit; font-weight: 400; color: var(--ink); min-width: 0; }
 .rowbtn.post { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); margin-left: 4px; }
 .pill.posted { margin-left: 4px; letter-spacing: 0; }
+.banner-dl { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; border-radius: var(--r); padding: 10px 14px; background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.banner-dl .fn { font-family: var(--font-data); font-size: 13px; overflow-wrap: anywhere; }
+.banner-dl .grow { flex: 1 1 auto; }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -626,6 +662,7 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
   </header>
   <div class="banner-upd" id="update" hidden><b>A new version of Tidy Sheets is ready.</b><button class="btn sm" id="updbtn" type="button">Update now</button></div>
   <div class="banner-imp" id="imported" hidden></div>
+  <div class="banner-dl" id="dlBar" hidden></div>
   <section class="hist" id="catSetup" hidden>
     <b>Connect your public catalog (one time)</b>
     <ol class="steps-list">
@@ -1630,8 +1667,66 @@ async function searchHistory() {
     + `</tbody></table></div>`;
 }
 
+/* ---------- new files in Downloads ---------- */
+// Spreadsheets saved to ~/Downloads after the last one opened or dismissed are offered in a bar with an Open button.
+let dlHandled = 0, dlFiles = [];
+try { dlHandled = +localStorage.getItem("tidyDlHandled") || 0; } catch (e) { /* offered again next time */ }
+if (!dlHandled) { dlHandled = Date.now() / 1000; try { localStorage.setItem("tidyDlHandled", String(dlHandled)); } catch (e) { /* first visit */ } }
+function markHandled(mtime) {
+  dlHandled = Math.max(dlHandled, mtime);
+  try { localStorage.setItem("tidyDlHandled", String(dlHandled)); } catch (e) { /* this visit only */ }
+}
+function renderDlBar() {
+  const fresh = dlFiles.filter(f => f.mtime > dlHandled + 0.5), bar = $("#dlBar");
+  bar.hidden = !fresh.length;
+  if (!fresh.length) return;
+  const f = fresh[0];
+  bar.innerHTML = `<b>New file in Downloads:</b> <span class="fn">${esc(f.name)}</span><span class="grow"></span>`
+    + `<button class="btn sm" type="button" data-open="${esc(f.name)}">Open</button>`
+    + (fresh.length > 1 ? `<button class="btn sm ghost" type="button" data-more="1">${fresh.length - 1} more</button>` : "")
+    + `<button class="btn sm ghost" type="button" data-dismiss="1">${fresh.length > 1 ? "Dismiss all" : "Dismiss"}</button>`;
+}
+async function checkDownloads() {
+  if (document.visibilityState !== "visible") return;
+  try { dlFiles = (await api("/api/downloads")).files || []; } catch (e) { return; }
+  renderDlBar();
+}
+async function openDownload(name) {
+  const f = dlFiles.find(x => x.name === name);
+  try {
+    const r = await fetch("/api/download?name=" + encodeURIComponent(name), { cache: "no-store" });
+    if (!r.ok) throw new Error(String(r.status));
+    const blob = await r.blob();
+    if (f) markHandled(f.mtime);
+    renderDlBar();
+    await loadFile(new File([blob], name));
+  } catch (e) {
+    $("#dlBar").innerHTML = `<span class="err">Couldn't open “${esc(name)}” from Downloads.</span> Drag it onto this page instead.`;
+  }
+}
+$("#dlBar").addEventListener("click", e => {
+  const b = e.target.closest("button");
+  if (!b) return;
+  const fresh = dlFiles.filter(f => f.mtime > dlHandled + 0.5);
+  if (b.dataset.open) openDownload(b.dataset.open);
+  else if (b.dataset.dismiss) { markHandled(fresh[0].mtime); renderDlBar(); }
+  else if (b.dataset.more) {
+    $("#dlBar").innerHTML = `<b>New files in Downloads:</b>` + fresh.map(f => `<button class="btn sm ghost" type="button" data-open="${esc(f.name)}">${esc(f.name)}</button>`).join("")
+      + `<button class="btn sm ghost" type="button" data-dismiss-all="1">Dismiss all</button>`;
+  } else if (b.dataset.dismissAll) { markHandled(Math.max(...fresh.map(f => f.mtime))); renderDlBar(); }
+});
+setInterval(checkDownloads, 4000);
+document.addEventListener("visibilitychange", checkDownloads);
+window.addEventListener("focus", checkDownloads);
+checkDownloads();
+
 /* ---------- events ---------- */
-$("#file").addEventListener("change", e => { loadFile(e.target.files[0]); e.target.value = ""; });
+$("#file").addEventListener("change", e => {
+  const f = e.target.files[0];
+  const d = f && dlFiles.find(x => x.name === f.name);
+  if (d) { markHandled(d.mtime); renderDlBar(); }
+  loadFile(f); e.target.value = "";
+});
 $("#vendorSel").addEventListener("change", e => {
   const v = e.target.value;
   if (v === "__new" || v === "__rename") return renderVendorBar(v === "__new" ? "new" : "rename");
