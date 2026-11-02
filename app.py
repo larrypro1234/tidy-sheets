@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 16
+VERSION = 17
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -985,7 +985,7 @@ function renderVendorBar(mode) {
   $("#newVendor").hidden = !mode;
   if (mode) {
     $("#newVendor").dataset.mode = mode;
-    $("#newName").value = mode === "rename" ? vendor.name : (prefix ? prefix.charAt(0) + prefix.slice(1).toLowerCase() : "");
+    $("#newName").value = mode === "rename" ? vendor.name : (prefix ? (prefix.length <= 4 ? prefix : prefix.charAt(0) + prefix.slice(1).toLowerCase()) : "");
     $("#newSave").textContent = mode === "rename" ? "Save name" : "Save company";
     $("#newName").focus(); $("#newName").select();
   }
@@ -1483,6 +1483,18 @@ function mergeSameUpc(R, upj, units, cj) {
     if (typeof x !== "string") return x;
     const g = groups.get(x);
     if (g.length === 1) return g[0];
+    // Same price everywhere: the same offer from several warehouses, so the quantities add up.
+    if (g.every(r => Math.abs(cost(r) - cost(g[0])) < 0.005 || cost(r) === cost(g[0]))) {
+      const best = g[0], parts = g.map(r => ({ r, qty: qty(r) }));
+      const qtyCols = R.cols.map((c, j) => j).filter(j => R.cols[j].type === "number" && /\b(ava?i?l\w*|in ?stock|on ?hand|units|cases|qty|quantity)\b/i.test(cname(R.cols[j])) && !/\b(case ?pack|pack|per|pallet|pl)\b/i.test(cname(R.cols[j])));
+      const sums = qtyCols.map(j => g.reduce((t, r) => t + (typeof r.val[j] === "number" ? r.val[j] : 0), 0));
+      best.parts = parts.map(p => ({ val: p.r.val.slice(), qty: p.qty }));
+      qtyCols.forEach((j, i) => { best.val[j] = sums[i]; });
+      best.summed = true;
+      best.others = g.slice(1);
+      merged += best.others.length;
+      return best;
+    }
     const best = g.slice().sort((a, b) => (qty(b) >= MIN_QTY) - (qty(a) >= MIN_QTY) || cost(a) - cost(b) || qty(b) - qty(a))[0];
     best.others = g.filter(r => r !== best);
     merged += best.others.length;
@@ -1581,7 +1593,7 @@ function show() {
   const tab = (k, label, count) => `<button class="vtab" type="button" data-view="${k}" aria-pressed="${view === k}">${label} <span>${n(count)}</span></button>`;
   $("#info").innerHTML = `<div class="note">${note}</div>`
     + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Under " + MIN_QTY, rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}${mine.length ? tab("mine", "You rejected", mine.length) : ""}`
-    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} duplicate listings combined` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : (cur.pj >= 0 ? ` · under ${MIN_QTY} units (“${esc(R.cols[qj].name)}” × “${esc(R.cols[cur.pj].name)}”) is rejected` : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`)}</span></div>`;
+    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} repeat listings combined` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : (cur.pj >= 0 ? ` · under ${MIN_QTY} units (“${esc(R.cols[qj].name)}” × “${esc(R.cols[cur.pj].name)}”) is rejected` : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`)}</span></div>`;
 
   $("#tabs").hidden = sheets.length < 2;
   $("#tabs").innerHTML = sheets.map((s, i) => `<button class="tab" role="tab" type="button" data-i="${i}" aria-selected="${i === active}">${esc(s.name)}</button>`).join("");
@@ -1616,6 +1628,13 @@ function show() {
       + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && !e.offer && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
   const dupTag = r => {
+    if (r.summed) {
+      // The column that tells the copies apart, e.g. the warehouse.
+      const dj = R.cols.findIndex((c, j) => c.type === "text" && new Set(r.parts.map(p => p.val[j])).size > 1);
+      const where = p => dj >= 0 && p.val[dj] != null ? String(p.val[dj]) : "";
+      const lines = r.parts.map(p => [where(p), p.qty >= 0 ? n(p.qty) + " units" : ""].filter(Boolean).join(": "));
+      return ` <span class="pill dup" title="Listed ${r.parts.length} times at the same price, so the quantities are added up: ${esc(lines.join("; "))}">×${r.parts.length} added</span>`;
+    }
     const line = x => [keyOf(x), cur.units(x) != null ? n(cur.units(x)) + " units" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
     return ` <span class="pill dup" title="Listed ${r.others.length + 1} times in this file. Showing ${esc(line(r))}. Also: ${esc(r.others.map(line).join("; "))}">×${r.others.length + 1}</span>`;
   };
