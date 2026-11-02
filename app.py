@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 13
+VERSION = 14
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -628,6 +628,7 @@ td a { color: var(--accent); }
 .banner-dl { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; border-radius: var(--r); padding: 10px 14px; background: color-mix(in srgb, var(--accent) 10%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); }
 .banner-dl .fn { font-family: var(--font-data); font-size: 13px; overflow-wrap: anywhere; }
 .banner-dl .grow { flex: 1 1 auto; }
+td .sub { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -1201,7 +1202,7 @@ function amzOf(r) {
   if (!k) return amz.map.size ? 0 : undefined; // no UPC: can't be matched on Amazon
   const e = amz.map.get(k);
   if (!e) return undefined;
-  return e.length === 1 ? 0 : { day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined };
+  return e.length === 1 ? 0 : { day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined, count: e.length >= 9 ? e[8] : null };
 }
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
@@ -1210,14 +1211,31 @@ function costColumn(R) {
   return find(/\blow ?sell\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
 }
 // Profit and ROI for one product: Amazon price minus referral fee, FBA fee and your cost.
+// How many items an Amazon listing holds ("Pack of 12"), from Keepa's number of items, else its title.
+function titlePack(t) {
+  const m = String(t || "").match(/\bpack of (\d{1,3})\b/i) || String(t || "").match(/\b(\d{1,3})[- ]?(pack|pk)\b/i);
+  return m ? +m[1] : 0;
+}
+// How many items the supplier's own unit already holds ("3pk", "Pack of 2"), from its description.
+function vendorPack(r) {
+  const dj = descColumn(cur.R);
+  return dj >= 0 ? titlePack(r.val[dj]) || 1 : 1;
+}
+// Units of the supplier's item needed for one Amazon listing: a 12-pack listing of a single tube = 12.
+function packMult(r, a) {
+  const amazonCount = (typeof a.count === "number" && a.count > 0 ? a.count : 0) || titlePack(a.title) || 1;
+  const mine = vendorPack(r);
+  return amazonCount >= 2 * mine ? Math.round(amazonCount / mine) : 1;
+}
 function econ(r) {
   const a = amzOf(r);
   if (!a || !a.price) return null;
-  const price = a.price / 100, cost = cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? r.val[cur.cj] : null;
+  const unit = cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? r.val[cur.cj] : null, mult = packMult(r, a);
+  const price = a.price / 100, cost = unit == null ? null : unit * mult;
   const refPct = typeof a.ref === "number" && a.ref > 0 ? a.ref : EST_REF_PCT;
   const fba = typeof a.fba === "number" && a.fba >= 0 ? a.fba / 100 : EST_FBA / 100;
   const fees = price * refPct / 100 + fba, profit = cost == null ? null : price - fees - cost;
-  return { price, cost, fees, profit, roi: cost ? profit / cost : null, est: !(typeof a.ref === "number" && a.ref > 0 && typeof a.fba === "number" && a.fba >= 0) };
+  return { price, unit, mult, cost, fees, profit, roi: cost ? profit / cost : null, est: !(typeof a.ref === "number" && a.ref > 0 && typeof a.fba === "number" && a.fba >= 0) };
 }
 // Why an on-Amazon product doesn't make the cut, or null if it does.
 function failReason(r) {
@@ -1240,6 +1258,9 @@ function bestMonth(p) {
   const h = Array.isArray(p.monthlySoldHistory) ? p.monthlySoldHistory : [];
   for (let i = 0; i + 1 < h.length; i += 2) if ((h[i] + KEEPA_EPOCH_MIN) * 60000 >= since && h[i + 1] > best) best = h[i + 1];
   return best;
+}
+function listingCount(p) {
+  return [p.numberOfItems, p.packageQuantity].find(v => typeof v === "number" && v > 0) || titlePack(p.title) || 1;
 }
 async function loadAmazon() {
   amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() };
@@ -1345,10 +1366,10 @@ async function scan(refreshKept) {
         const price = main.length ? Math.min(...main) : (pos(curv[1]) ? curv[1] : 0);
         const ref = [p.referralFeePercentage, p.referralFeePercent].find(v => typeof v === "number" && v > 0) ?? null;
         const fba = p.fbaFees && typeof p.fbaFees.pickAndPackFee === "number" && p.fbaFees.pickAndPackFee >= 0 ? p.fbaFees.pickAndPackFee : null;
-        const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 80), ref, fba, bestMonth(p)];
+        const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 200), ref, fba, bestMonth(p), listingCount(p)];
         for (const c of codes) if (!hit.has(c)) hit.set(c, entry);
       }
-      if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 80), null, null, bestMonth(p)]); }
+      if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 200), null, null, bestMonth(p), listingCount(p)]); }
       for (const b of batch) { const e = hit.get(b.k); amzPut(b.k, e || [today]); if (e) found++; }
       done += batch.length; i += BATCH;
       show();
@@ -1556,7 +1577,7 @@ function show() {
     if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
     return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
-      + `<td class="n">${cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`
+      + `<td class="n">${e && e.cost != null ? usd(e.cost) + (e.mult > 1 ? `<span class="sub" title="Amazon listing is a ${e.mult}-pack of this item">${e.mult} × ${usd(e.unit)}</span>` : "") : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
       + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
