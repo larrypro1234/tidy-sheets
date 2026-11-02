@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 15
+VERSION = 16
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -631,6 +631,8 @@ td a { color: var(--accent); }
 td .sub { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; }
 td .packbtn { background: none; border: none; padding: 0; margin-left: auto; font: inherit; font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
 td .warn { color: var(--bad); font-weight: 600; }
+.offer-sw { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 500; cursor: pointer; }
+.offer-sw input { accent-color: var(--accent); }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -721,6 +723,7 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
   <div class="amz" id="amz" hidden>
     <b>Amazon check</b>
     <button class="btn sm" id="scanBtn" type="button">Scan on Keepa</button>
+    <label class="offer-sw" for="offerSw" title="Ignore the file's prices and show the most you can pay per unit for 40% ROI"><input type="checkbox" id="offerSw"> Offer mode</label>
     <button class="btn sm ghost" id="refreshBtn" type="button" hidden title="Check today's Amazon price again for the products in Kept">Refresh prices</button>
     <button class="btn sm ghost" id="stopBtn" type="button" hidden>Stop</button>
     <span id="amzStatus" class="status" role="status"></span>
@@ -1092,7 +1095,8 @@ async function openPost(k) {
   const R = cur.R, dj = descColumn(R), a = amzOf(r), raw = upcDigits(r.val[cur.upj]);
   const brandCol = R.cols.findIndex(c => /\bbrand\b/i.test(cname(c)));
   $("#pTitle").textContent = dj >= 0 ? String(r.val[dj] || "") : "";
-  $("#pInfo").textContent = [cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? "Our cost $" + r.val[cur.cj].toFixed(2) : "", a && a.price ? "Amazon $" + (a.price / 100).toFixed(2) : "", a && a.asin ? a.asin : ""].filter(Boolean).join(" · ");
+  const ec = econ(r);
+  $("#pInfo").textContent = [ec && ec.offer ? "Max offer $" + ec.maxUnit.toFixed(2) + "/unit" : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? "Our cost $" + r.val[cur.cj].toFixed(2) : "", a && a.price ? "Amazon $" + (a.price / 100).toFixed(2) : "", a && a.asin ? a.asin : ""].filter(Boolean).join(" · ");
   $("#pBrand").value = brandCol >= 0 && r.val[brandCol] ? String(r.val[brandCol]) : "";
   $("#pPrice").value = ""; $("#pMoq").value = ""; $("#pExp").value = "NA";
   $("#pUpc").value = raw.length === 11 ? "0" + raw : raw;
@@ -1241,15 +1245,25 @@ function packMult(r, a) {
   const mine = vendorPack(r);
   return amazonCount >= 2 * mine ? Math.round(amazonCount / mine) : 1;
 }
+// Offer mode: the supplier wants you to name a price, so instead of ROI on their cost the app shows the most you can pay
+// per unit and still make MIN_ROI. On by itself for files with no price column, or with the Offer mode switch.
+let offerToggle = false;
+try { offerToggle = localStorage.getItem("tidyOfferMode") === "1"; } catch (e) { /* off */ }
+const offerMode = () => !!cur && (cur.cj < 0 || offerToggle);
 function econ(r) {
   const a = amzOf(r);
   if (!a || !a.price) return null;
-  const unit = cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? r.val[cur.cj] : null, mult = packMult(r, a);
-  const price = a.price / 100, cost = unit == null ? null : unit * mult;
+  const mult = packMult(r, a), price = a.price / 100;
   const refPct = typeof a.ref === "number" && a.ref > 0 ? a.ref : EST_REF_PCT;
   const fba = typeof a.fba === "number" && a.fba >= 0 ? a.fba / 100 : EST_FBA / 100;
-  const fees = price * refPct / 100 + fba, profit = cost == null ? null : price - fees - cost;
-  return { price, unit, mult, cost, fees, profit, roi: cost ? profit / cost : null, est: !(typeof a.ref === "number" && a.ref > 0 && typeof a.fba === "number" && a.fba >= 0) };
+  const fees = price * refPct / 100 + fba, est = !(typeof a.ref === "number" && a.ref > 0 && typeof a.fba === "number" && a.fba >= 0);
+  if (offerMode()) {
+    const maxListing = (price - fees) / (1 + MIN_ROI);
+    return { offer: true, price, mult, fees, est, maxListing, maxUnit: maxListing / mult, cost: maxListing, profit: price - fees - maxListing, roi: MIN_ROI };
+  }
+  const unit = cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? r.val[cur.cj] : null, cost = unit == null ? null : unit * mult;
+  const profit = cost == null ? null : price - fees - cost;
+  return { price, unit, mult, cost, fees, profit, roi: cost ? profit / cost : null, est };
 }
 // Why an on-Amazon product doesn't make the cut, or null if it does.
 function failReason(r) {
@@ -1261,6 +1275,7 @@ function failReason(r) {
   if (a.rank > MAX_RANK) return "Rank over " + n(MAX_RANK);
   if (a.sold !== undefined && !(a.sold >= MIN_SOLD)) return `Never ${MIN_SOLD}+ sold/month`;
   const e = econ(r);
+  if (e && e.offer) return e.maxUnit > 0 ? null : "No room for profit";
   if (e && e.roi != null && e.roi < MIN_ROI) return "ROI " + Math.round(e.roi * 100) + "%";
   return null;
 }
@@ -1329,11 +1344,13 @@ function renderAmzBar() {
   $("#refreshBtn").hidden = !pass; $("#refreshBtn").textContent = `Refresh prices (${n(pass)} in Kept)`;
   const noFees = states.filter(s => s && s.asin && s.sold === undefined).length;
   amzStatus(checked
-    ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} pass: $${(MIN_AMZ_PRICE / 100).toFixed(2)}+, ${Math.round(MIN_ROI * 100)}%+ ROI, rank under ${n(MAX_RANK)}, ${MIN_SOLD}+ sold in a month</b>`
+    ? `${n(checked)} of ${n(rows.length)} checked · ${n(on)} on Amazon · <b class="ok">${n(pass)} pass: $${(MIN_AMZ_PRICE / 100).toFixed(2)}+, ${offerMode() ? "" : Math.round(MIN_ROI * 100) + "%+ ROI, "}rank under ${n(MAX_RANK)}, ${MIN_SOLD}+ sold in a month</b>`
       + (noFees ? ` · press Scan to get fees and monthly sales for ${n(noFees)} products checked before` : "")
-      + (cur.cj < 0 ? " · no cost column found, so ROI can't be worked out" : "")
+      + (offerMode() ? ` · <b>Offer mode:</b> Max offer = the most to pay per unit for ${Math.round(MIN_ROI * 100)}% ROI` + (cur.cj < 0 ? " (this file has no prices)" : "") : "")
     : `Checks each kept product's UPC on Keepa and keeps only the ones on Amazon at ${Math.round(MIN_ROI * 100)}%+ ROI.`);
   $("#keyChange").hidden = !keepaKey;
+  $("#offerSw").checked = offerMode(); $("#offerSw").disabled = cur.cj < 0;
+  $("#offerSw").parentElement.title = cur.cj < 0 ? "This file has no prices, so Offer mode is always on" : "Ignore the file's prices and show the most you can pay per unit for 40% ROI";
 }
 async function scan(refreshKept) {
   if (scanning || !cur || cur.upj < 0) return;
@@ -1531,7 +1548,8 @@ function show() {
   const keptAll = cur.kept.filter(r => !why.has(r) && !isRejected(r)), banned = cur.kept.filter(r => why.has(r));
   const onOrUnchecked = keptAll.filter(r => amzOf(r) !== 0), notOn = keptAll.filter(r => amzOf(r) === 0);
   const failWhy = new Map(); onOrUnchecked.forEach(r => { const w = failReason(r); if (w) failWhy.set(r, w); });
-  const byRoi = rows => rows.slice().sort((x, y) => { const a = econ(x), b = econ(y); return ((b && b.roi) ?? -1e9) - ((a && a.roi) ?? -1e9); });
+  const rank = e => !e ? -1e9 : e.offer ? e.profit : (e.roi ?? -1e9); // offer mode: biggest profit first
+  const byRoi = rows => rows.slice().sort((x, y) => rank(econ(y)) - rank(econ(x)));
   const kept = byRoi(onOrUnchecked.filter(r => !failWhy.has(r))), low = byRoi(onOrUnchecked.filter(r => failWhy.has(r)));
   const isNew = r => hist && hist.status === "ready" && !hist.first && hist.fresh.has(keyOf(r));
   const freshRows = kept.filter(isNew);
@@ -1591,9 +1609,11 @@ function show() {
     if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
     return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
-      + `<td class="n">${e && e.cost != null ? usd(e.cost) + `<button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `${e.mult} × ${usd(e.unit)}` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button>` : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`
+      + (e && e.offer
+        ? `<td class="n" title="Pay at most this per unit to make ${Math.round(MIN_ROI * 100)}% ROI (${usd(e.maxListing)} for the whole Amazon listing)"><b>${usd(e.maxUnit)}</b><span class="sub">per unit</span><button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `listing = ${e.mult} units` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button></td>`
+        : `<td class="n">${e && e.cost != null ? usd(e.cost) + `<button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `${e.mult} × ${usd(e.unit)}` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button>` : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`)
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
-      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
+      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && !e.offer && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
   const dupTag = r => {
     const line = x => [keyOf(x), cur.units(x) != null ? n(cur.units(x)) + " units" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
@@ -1602,7 +1622,7 @@ function show() {
   const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0));
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
-  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>Our cost</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
+  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
     `<tr>${act ? actTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => [r.val[j], j]).map(([v, j]) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${esc(fmt(v, R.cols[j]))}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
@@ -1821,6 +1841,11 @@ $("#chips").addEventListener("click", e => {
   if (cur) show();
 });
 $("#scanBtn").addEventListener("click", () => scan(false));
+$("#offerSw").addEventListener("change", e => {
+  offerToggle = e.target.checked;
+  try { localStorage.setItem("tidyOfferMode", offerToggle ? "1" : "0"); } catch (err) { /* this visit only */ }
+  show();
+});
 $("#refreshBtn").addEventListener("click", () => scan(true));
 $("#stopBtn").addEventListener("click", () => { if (scanning) scanning.stop = true; });
 $("#keyChange").addEventListener("click", () => { $("#keyForm").hidden = false; $("#keyIn").value = ""; $("#keyIn").focus(); });
