@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 14
+VERSION = 15
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -629,6 +629,8 @@ td a { color: var(--accent); }
 .banner-dl .fn { font-family: var(--font-data); font-size: 13px; overflow-wrap: anywhere; }
 .banner-dl .grow { flex: 1 1 auto; }
 td .sub { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; }
+td .packbtn { background: none; border: none; padding: 0; margin-left: auto; font: inherit; font-size: 11px; color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+td .warn { color: var(--bad); font-weight: 600; }
 .link { background: none; border: none; padding: 0; margin-left: 6px; color: var(--accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .tabs { display: flex; gap: 4px; overflow-x: auto; }
 .tab { border: 1px solid var(--line); border-bottom: none; background: var(--sunk); padding: 6px 12px; border-radius: 6px 6px 0 0; cursor: pointer; font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; color: var(--ink); }
@@ -1221,9 +1223,21 @@ function vendorPack(r) {
   const dj = descColumn(cur.R);
   return dj >= 0 ? titlePack(r.val[dj]) || 1 : 1;
 }
+// "12 Count" in an Amazon title, unless the supplier's description has the same count (a 120-count bottle is one bottle).
+function titleCount(t, vendorText) {
+  const m = String(t || "").match(/\b(\d{1,3})\s?(count|ct)\b/i);
+  if (!m) return 0;
+  return new RegExp("\\b" + m[1] + "\\s?(count|ct)\\b", "i").test(String(vendorText || "")) ? 0 : +m[1];
+}
+// Pack counts you set by hand per ASIN (the ×N link under Our cost): packs/overrides {asin: n}.
+let packOverrides = {};
+dbP.then(db => db.doc("packs/overrides").get()).then(s => { packOverrides = (s.exists && s.data().asins) || {}; if (cur) show(); }).catch(() => {});
 // Units of the supplier's item needed for one Amazon listing: a 12-pack listing of a single tube = 12.
+// Keepa's item count and the title can disagree (sellers enter it wrong), so the larger one wins.
 function packMult(r, a) {
-  const amazonCount = (typeof a.count === "number" && a.count > 0 ? a.count : 0) || titlePack(a.title) || 1;
+  if (a.asin && packOverrides[a.asin] > 0) return packOverrides[a.asin];
+  const dj = descColumn(cur.R), vendorText = dj >= 0 ? r.val[dj] : "";
+  const amazonCount = Math.max(typeof a.count === "number" && a.count > 0 ? a.count : 0, titlePack(a.title), titleCount(a.title, vendorText), 1);
   const mine = vendorPack(r);
   return amazonCount >= 2 * mine ? Math.round(amazonCount / mine) : 1;
 }
@@ -1260,7 +1274,7 @@ function bestMonth(p) {
   return best;
 }
 function listingCount(p) {
-  return [p.numberOfItems, p.packageQuantity].find(v => typeof v === "number" && v > 0) || titlePack(p.title) || 1;
+  return Math.max(...[p.numberOfItems, p.packageQuantity].filter(v => typeof v === "number" && v > 0), titlePack(p.title), 1);
 }
 async function loadAmazon() {
   amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() };
@@ -1577,9 +1591,9 @@ function show() {
     if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
     return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
-      + `<td class="n">${e && e.cost != null ? usd(e.cost) + (e.mult > 1 ? `<span class="sub" title="Amazon listing is a ${e.mult}-pack of this item">${e.mult} × ${usd(e.unit)}</span>` : "") : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`
+      + `<td class="n">${e && e.cost != null ? usd(e.cost) + `<button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `${e.mult} × ${usd(e.unit)}` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button>` : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
-      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
+      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
   const dupTag = r => {
     const line = x => [keyOf(x), cur.units(x) != null ? n(cur.units(x)) + " units" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
@@ -1783,6 +1797,17 @@ $("#bans").addEventListener("submit", e => {
   if (cur) show();
 });
 $("#sheet").addEventListener("click", e => {
+  const kb = e.target.closest("button[data-pack]");
+  if (kb) {
+    const asin = kb.dataset.pack, now = +kb.dataset.mult || 1;
+    const v = window.prompt(`How many of this item are in Amazon listing ${asin}?\n(1 = a single item, 12 = a 12-pack)`, String(now));
+    if (v === null) return;
+    const nnum = Math.round(+String(v).replace(/[^\d.]/g, ""));
+    if (!(nnum >= 1 && nnum <= 500)) return;
+    packOverrides[asin] = nnum;
+    dbP.then(db => db.doc("packs/overrides").set({ asins: packOverrides })).catch(() => {});
+    return show();
+  }
   const pb = e.target.closest("button[data-post]");
   if (pb) return openPost(pb.dataset.post);
   const b = e.target.closest("button[data-rej], button[data-undo]");
