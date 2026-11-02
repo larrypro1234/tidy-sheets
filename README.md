@@ -4,7 +4,7 @@ A small app for vendor inventory spreadsheets. Upload a vendor's file and it:
 
 - **Cleans it up**: finds the header row, removes blank rows, duplicates and totals rows, trims spaces, and reads numbers, prices and dates.
 - **One row per UPC**: when a vendor lists the same UPC more than once, the app keeps the listing with enough stock and the lowest cost, and marks it ×2, ×3… (hover to see the others).
-- **Rejects low stock**: products with less than 300 in the quantity column.
+- **Rejects low stock**: products with less than 300 units available (the available-quantity column; when it counts cases, cases × pack size).
 - **Remembers each company**: picked from the start of the file name (e.g. `BAZ-…` → The Bazaar), or chosen from the Company menu.
 - **Applies that company's bans**: any product whose text contains a banned word or brand.
 - **Marks new products**: ones you haven't seen from that company before.

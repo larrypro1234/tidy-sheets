@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 11
+VERSION = 12
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -918,7 +918,7 @@ let sheets = [], active = 0, fileName = "", prefix = "", cur = null, hist = null
 let vendors = [], vendor = null, lastWrite = null;
 const slug = s => String(s).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "company";
 const vkey = () => vendor.key;
-const GENERIC = /^(inventory|inv|deals?|offers?|list|prices?|pricing|products?|export|report|sheet|data|copy|new|file|untitled|book|stock|catalog|items?|download|spreadsheet|workbook)$/i;
+const GENERIC = /^(inventory|inv|deals?|offers?|list|prices?|pricing|pricelist|products?|export|report|sheet|data|copy|new|file|untitled|book|stock|stocklist|catalog|items?|download|spreadsheet|workbook|availability|closeouts?|specials?|weekly|daily)$/i;
 function filePrefix(name) {
   const first = name.replace(/\.[^.]+$/, "").split(/[-_\s]+/).find(Boolean) || "";
   return /[a-z]/i.test(first) && !GENERIC.test(first) ? first.toUpperCase() : "";
@@ -1049,7 +1049,7 @@ async function openPost(k) {
   const r = rowByKey(k);
   if (!r) return;
   postRow = r;
-  const R = cur.R, dj = descColumn(R), a = amzOf(r), raw = String(r.val[cur.upj] ?? "").replace(/\D/g, "");
+  const R = cur.R, dj = descColumn(R), a = amzOf(r), raw = upcDigits(r.val[cur.upj]);
   const brandCol = R.cols.findIndex(c => /\bbrand\b/i.test(cname(c)));
   $("#pTitle").textContent = dj >= 0 ? String(r.val[dj] || "") : "";
   $("#pInfo").textContent = [cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? "Our cost $" + r.val[cur.cj].toFixed(2) : "", a && a.price ? "Amazon $" + (a.price / 100).toFixed(2) : "", a && a.asin ? a.asin : ""].filter(Boolean).join(" · ");
@@ -1146,7 +1146,15 @@ function renderBans() {
 const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, MAX_RANK = 350000, MIN_SOLD = 50, EST_REF_PCT = 15, EST_FBA = 350; // ROI and price floors; fallback fees in % and cents
 const AMZ_CHUNK = 1500, BATCH = 20;
 let amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() }, keepaKey = null, keyLoaded = false, scanning = null;
-const normUpc = v => { const d = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
+// The UPC in a cell: its one run of digits (11 digits get back their lost leading zero).
+// A cell listing several UPCs, like a mixed floor display, has no single UPC.
+function upcDigits(v) {
+  const s = String(v == null ? "" : v), groups = s.match(/\d{8,14}/g);
+  if (groups && groups.length > 1) return "";
+  const d = groups ? groups[0] : s.replace(/\D/g, "");
+  return d.length === 11 ? "0" + d : d;
+}
+const normUpc = v => { const d = upcDigits(v).replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
 // Column names compared with underscores as spaces, so "UPC_CD" and "AV_QTY" are recognized.
 const cname = c => String(c.name).replace(/_/g, " ");
 function upcColumn(R) { return R.cols.findIndex(c => /\b(upc|ean|gtin|barcode)\b/i.test(cname(c))); }
@@ -1262,7 +1270,7 @@ async function scan(refreshKept) {
   const todo = [], seenK = new Set();
   for (const r of cur.kept) {
     if (bannedBy(r) || isRejected(r)) continue;
-    const digits = String(r.val[cur.upj] ?? "").replace(/\D/g, ""), raw = digits.length === 11 ? "0" + digits : digits, k = normUpc(raw); // 11 digits: a UPC that lost its leading zero
+    const raw = upcDigits(r.val[cur.upj]), k = normUpc(raw);
     if (!k || seenK.has(k)) continue;
     seenK.add(k);
     const e = amz.map.get(k);
@@ -1344,10 +1352,18 @@ function qtyColumn(R) {
   const nm = j => cname(R.cols[j]);
   const notQty = /\b(so|sold|sales|order|ordered|orders|on order|po|min|moq|case|cs|inner|pack|pk|pallet|reserved|alloc|allocated|committed|incoming|backorder)\b/i;
   const find = re => num.find(j => re.test(nm(j)) && !notQty.test(nm(j)));
-  return find(/\b(av|avl|avail|available)\b.*\b(qty|quantity)\b|\b(qty|quantity)\b.*\b(av|avl|avail|available)\b/i)  // "AV QTY", "Qty. Available"
-    ?? find(/\b(available|in ?stock|on ?hand)\b/i)                                                                         // "IN STOCK", "On Hand"
+  // "ava?i?l…" also catches misspellings like "Avalible".
+  return find(/\b(av|ava?i?l\w*)\b.*\b(qty|quantity)\b|\b(qty|quantity)\b.*\b(av|ava?i?l\w*)\b/i)  // "AV QTY", "Qty. Available"
+    ?? find(/\b(ava?i?l\w*|in ?stock|on ?hand)\b/i)                                                       // "IN STOCK", "On Hand", "Cases Avalible"
     ?? find(/\b(qty|quantity)\b/i)
     ?? find(/\b(stock|units|inventory)\b/i) ?? -1;
+}
+// When the quantity is counted in cases ("Cases Available"), the pack-size column turns it into units.
+function packColumn(R, qj) {
+  if (!/\b(cases?|cs|ctns?|cartons?|boxes)\b/i.test(cname(R.cols[qj]))) return -1;
+  const num = R.cols.map((c, j) => j).filter(j => j !== qj && R.cols[j].type === "number");
+  const find = re => num.find(j => re.test(cname(R.cols[j])));
+  return find(/\b(pack ?size|case ?pack|cs ?pk|units? per (case|cs|ctn)|per (case|cs|ctn))\b/i) ?? find(/\b(pack|pk|count|ct)\b/i) ?? -1;
 }
 // The column that names each product: an ID-like column whose values are (nearly) all filled and different.
 function idColumn(R) {
@@ -1363,7 +1379,7 @@ const niceDate = iso => { try { return new Date(iso).toLocaleDateString("en-US",
 
 // Some vendors list the same UPC more than once (different lots or IDs). Keep one row per UPC: a listing with
 // enough stock first, then the lowest cost, then the most stock. The others are kept on the row for the ×2 tag.
-function mergeSameUpc(R, upj, qj, cj) {
+function mergeSameUpc(R, upj, units, cj) {
   if (upj < 0) return 0;
   const groups = new Map(), order = [];
   for (const r of R.rows) {
@@ -1371,7 +1387,7 @@ function mergeSameUpc(R, upj, qj, cj) {
     if (!k) { order.push(r); continue; }
     if (groups.has(k)) groups.get(k).push(r); else { groups.set(k, [r]); order.push(k); }
   }
-  const qty = r => qj >= 0 && typeof r.val[qj] === "number" ? r.val[qj] : -1;
+  const qty = r => units(r) ?? -1;
   const cost = r => cj >= 0 && typeof r.val[cj] === "number" ? r.val[cj] : Infinity;
   let merged = 0;
   R.rows = order.map(x => {
@@ -1387,11 +1403,14 @@ function mergeSameUpc(R, upj, qj, cj) {
 }
 function compute() {
   const R = organize(sheets[active].aoa, OPTS);
-  const qj = qtyColumn(R), upj = upcColumn(R), cj = costColumn(R);
-  const merged = mergeSameUpc(R, upj, qj, cj);
+  const qj = qtyColumn(R), upj = upcColumn(R), cj = costColumn(R), pj = qj >= 0 ? packColumn(R, qj) : -1;
+  // Units in stock: the quantity, times the pack size when the quantity is in cases.
+  const units = r => qj < 0 || typeof r.val[qj] !== "number" ? null
+    : pj >= 0 && typeof r.val[pj] === "number" && r.val[pj] > 0 ? r.val[qj] * r.val[pj] : r.val[qj];
+  const merged = mergeSameUpc(R, upj, units, cj);
   const all = sortRows(R);
-  const low = r => !(typeof r.val[qj] === "number" && r.val[qj] >= MIN_QTY);
-  cur = { R, qj, merged, kept: qj < 0 ? all : all.filter(r => !low(r)), rejected: qj < 0 ? [] : all.filter(low) };
+  const low = r => !(units(r) >= MIN_QTY);
+  cur = { R, qj, pj, units, merged, kept: qj < 0 ? all : all.filter(r => !low(r)), rejected: qj < 0 ? [] : all.filter(low) };
   cur.idj = idColumn(R);
   cur.upj = upj;
   cur.cj = cj;
@@ -1472,7 +1491,7 @@ function show() {
   const tab = (k, label, count) => `<button class="vtab" type="button" data-view="${k}" aria-pressed="${view === k}">${label} <span>${n(count)}</span></button>`;
   $("#info").innerHTML = `<div class="note">${note}</div>`
     + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Under " + MIN_QTY, rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}${mine.length ? tab("mine", "You rejected", mine.length) : ""}`
-    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} duplicate listings combined` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`}</span></div>`;
+    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} duplicate listings combined` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : (cur.pj >= 0 ? ` · under ${MIN_QTY} units (“${esc(R.cols[qj].name)}” × “${esc(R.cols[cur.pj].name)}”) is rejected` : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`)}</span></div>`;
 
   $("#tabs").hidden = sheets.length < 2;
   $("#tabs").innerHTML = sheets.map((s, i) => `<button class="tab" role="tab" type="button" data-i="${i}" aria-selected="${i === active}">${esc(s.name)}</button>`).join("");
@@ -1505,7 +1524,7 @@ function show() {
       + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b></td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
   const dupTag = r => {
-    const line = x => [keyOf(x), cur.qj >= 0 && x.val[cur.qj] != null ? n(x.val[cur.qj]) + " in stock" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
+    const line = x => [keyOf(x), cur.units(x) != null ? n(cur.units(x)) + " units" : "", cur.cj >= 0 && typeof x.val[cur.cj] === "number" ? "$" + x.val[cur.cj].toFixed(2) : ""].filter(Boolean).join(" · ");
     return ` <span class="pill dup" title="Listed ${r.others.length + 1} times in this file. Showing ${esc(line(r))}. Also: ${esc(r.others.map(line).join("; "))}">×${r.others.length + 1}</span>`;
   };
   const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0));
@@ -1582,15 +1601,15 @@ async function restoreSession() {
 /* ---------- history: where each UPC was offered ---------- */
 function descColumn(R) {
   const t = R.cols.map((c, j) => j).filter(j => R.cols[j].type === "text");
-  return t.find(j => /\b(desc|description|title|product|item name|name)\b/i.test(cname(R.cols[j]))) ?? t.find(j => j !== cur.idj && j !== cur.upj) ?? -1;
+  return t.find(j => /\b(desc\w*|title|product|item name|name)\b/i.test(cname(R.cols[j]))) ?? t.find(j => j !== cur.idj && j !== cur.upj) ?? -1;
 }
 function recordOffers() {
   if (!vendor || !cur || cur.upj < 0) return;
   const R = cur.R, dj = descColumn(R), num = v => typeof v === "number" ? v : null, rows = [];
   for (const r of R.rows) {
-    const raw = String(r.val[cur.upj] ?? "").replace(/\D/g, ""), upc = normUpc(raw);
+    const raw = upcDigits(r.val[cur.upj]), upc = normUpc(raw);
     if (!upc) continue;
-    rows.push({ upc, upc_raw: raw.length === 11 ? "0" + raw : raw, cost: cur.cj >= 0 ? num(r.val[cur.cj]) : null, qty: cur.qj >= 0 ? num(r.val[cur.qj]) : null,
+    rows.push({ upc, upc_raw: raw.length === 11 ? "0" + raw : raw, cost: cur.cj >= 0 ? num(r.val[cur.cj]) : null, qty: cur.units(r),
       item: keyOf(r) || "", description: dj >= 0 && r.val[dj] != null ? String(r.val[dj]).slice(0, 200) : "" });
   }
   api("/api/offers", { vendor: vendor.key, vendor_name: vendor.name, day: uploadDay || localDay(), file: fileName, rows }).catch(() => { /* recorded next upload */ });
