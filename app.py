@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 19
+VERSION = 20
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1194,17 +1194,18 @@ function renderBans() {
 const MIN_ROI = 0.40, MIN_AMZ_PRICE = 699, MAX_RANK = 350000, MIN_SOLD = 50, EST_REF_PCT = 15, EST_FBA = 350; // ROI and price floors; fallback fees in % and cents
 const AMZ_CHUNK = 1500, BATCH = 20;
 let amz = { chunks: [], where: new Map(), map: new Map(), dirty: new Set() }, keepaKey = null, keyLoaded = false, scanning = null;
-// The UPC in a cell: its one run of digits (11 digits get back their lost leading zero).
-// A cell listing several UPCs, like a mixed floor display, has no single UPC.
+// The UPC in a cell: its run of digits (11 digits get back their lost leading zero).
+// Several UPCs with a count after each, like "022000279774(18)", are a mixed floor display: no single UPC.
+// Several UPCs otherwise ("193052081049; New, 845218024970; Old") are alternatives: the first one is used.
 function upcDigits(v) {
   const s = String(v == null ? "" : v), groups = s.match(/\d{8,14}/g);
-  if (groups && groups.length > 1) return "";
+  if (groups && groups.length > 1 && /\d{8,14}\s*\(\s*\d+\s*\)/.test(s)) return "";
   const d = groups ? groups[0] : s.replace(/\D/g, "");
   return d.length === 11 ? "0" + d : d;
 }
 const normUpc = v => { const d = upcDigits(v).replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
-// Column names compared with underscores as spaces, so "UPC_CD" and "AV_QTY" are recognized.
-const cname = c => String(c.name).replace(/_/g, " ");
+// Column names compared with underscores and run-together words split, so "UPC_CD", "AV_QTY" and "UPCCodeList" are recognized.
+const cname = c => String(c.name).replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
 function upcColumn(R) { return R.cols.findIndex(c => /\b(upc|ean|gtin|barcode)\b/i.test(cname(c))); }
 function amzOf(r) {
   if (cur.upj < 0) return undefined;
