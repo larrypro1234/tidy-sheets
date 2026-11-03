@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 20
+VERSION = 21
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1467,7 +1467,13 @@ function idColumn(R) {
     ?? js.find(j => /\b(upc|ean|gtin|barcode|code)\b/i.test(cname(R.cols[j])) && ok(j))
     ?? js.find(j => R.cols[j].type === "text" && ok(j)) ?? -1;
 }
-const keyOf = r => cur.idj < 0 || r.val[cur.idj] == null ? null : String(r.val[cur.idj] instanceof Date ? isoD(r.val[cur.idj]) : r.val[cur.idj]).trim().toUpperCase();
+// What a product is remembered by (seen, rejected, posted): its ID, or its UPC when the ID cell is empty or there is no ID column.
+const keyOf = r => {
+  const id = cur.idj >= 0 && r.val[cur.idj] != null ? String(r.val[cur.idj] instanceof Date ? isoD(r.val[cur.idj]) : r.val[cur.idj]).trim().toUpperCase() : "";
+  if (id) return id;
+  const u = cur.upj >= 0 ? normUpc(r.val[cur.upj]) : "";
+  return u ? "UPC:" + u : null;
+};
 const localDay = () => { const d = new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
 const niceDate = iso => { try { return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }); } catch (e) { return iso; } };
 
@@ -1527,7 +1533,7 @@ async function remember() {
   const db = await dbP;
   if (!db) { hist = { status: "off" }; return; }
   if (!vendor) { hist = { status: "pick" }; return; }
-  if (cur.idj < 0) { hist = { status: "noid" }; return; }
+  if (cur.idj < 0 && cur.upj < 0) { hist = { status: "noid" }; return; }
   try {
     const vref = db.doc("vendors/" + vkey());
     const [vs, cs] = await Promise.all([vref.get(), vref.collection("seen").get()]);
@@ -1548,7 +1554,7 @@ async function remember() {
     }
     for (const c of dirty) await vref.collection("seen").doc(c.id).set({ ids: c.ids });
     const prefixes = [...new Set([...((meta && meta.prefixes) || []), ...(prefix ? [prefix] : [])])];
-    const next = { ...(meta || {}), name: vendor.name, prefixes, idColumn: cur.R.cols[cur.idj].name, uploads: ((meta && meta.uploads) || 0) + 1, lastUpload: new Date().toISOString(), lastFile: fileName, products: seen.size + fresh.length };
+    const next = { ...(meta || {}), name: vendor.name, prefixes, idColumn: cur.idj >= 0 ? cur.R.cols[cur.idj].name : "UPC", uploads: ((meta && meta.uploads) || 0) + 1, lastUpload: new Date().toISOString(), lastFile: fileName, products: seen.size + fresh.length };
     await vref.set(next);
     lastWrite = { key: vkey(), before, metaBefore: meta };
     vendors = vendors.filter(v => v.key !== vkey()).concat({ key: vkey(), name: vendor.name, prefixes });
@@ -1605,7 +1611,7 @@ function show() {
   if (!R.cols.length) { $("#sheet").innerHTML = `<div class="more">This sheet is empty.</div>`; return; }
   const cls = t => ["number", "currency", "percent"].includes(t) ? "n" : t === "date" ? "d" : "";
   const badge = view === "kept" && freshRows.length, reason = view === "banned" || view === "low";
-  const act = cur.idj >= 0 && ["kept", "new", "low", "noamz", "mine"].includes(view);
+  const act = (cur.idj >= 0 || cur.upj >= 0) && ["kept", "new", "low", "noamz", "mine"].includes(view);
   const postBtn = r => {
     if (!(view === "kept" || view === "new") || cur.upj < 0) return "";
     const u = normUpc(r.val[cur.upj]);
