@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 21
+VERSION = 22
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1513,16 +1513,48 @@ function mergeSameUpc(R, upj, units, cj) {
   });
   return merged;
 }
+// Some suppliers list a product once with its prices ("Kind Words Matte Lip Liner  $16.00  $6.00") and its shades
+// underneath with only a UPC and quantity. Each shade gets the product's prices and name; the product line and
+// category rows ("LIPS") are not products themselves.
+function fillFamilies(R, upj, qj, cj) {
+  if (upj < 0 || cj < 0) return 0;
+  const text = R.cols.map((c, j) => j).filter(j => j !== upj && R.cols[j].type === "text");
+  const dj = text.find(j => /\b(desc\w*|title|product|item name|name)\b/i.test(cname(R.cols[j]))) ?? text[0] ?? -1;
+  const nums = R.cols.map((c, j) => j).filter(j => j !== upj && ["number", "currency", "percent"].includes(R.cols[j].type));
+  let fam = null, filled = 0;
+  const drop = new Set();
+  for (const r of R.rows) {
+    if (!normUpc(r.val[upj])) {
+      const has = nums.filter(j => typeof r.val[j] === "number");
+      const label = dj >= 0 && r.val[dj] != null ? String(r.val[dj]) : "";
+      if (label && has.includes(cj) && (qj < 0 || r.val[qj] == null)) fam = { r, label, has }; // a product line: prices but no quantity
+      else if (!has.length && r.val.filter(v => v != null && v !== "").length <= 1) { fam = null; drop.add(r); } // a category row like "LIPS"
+      continue;
+    }
+    if (!fam) continue;
+    if (r.val[cj] != null) { fam = null; continue; }                   // a product with its own price: the line has ended
+    const missing = fam.has.filter(j => r.val[j] == null);
+    missing.forEach(j => { r.val[j] = fam.r.val[j]; });
+    if (dj >= 0) {
+      const d = r.val[dj] == null ? "" : String(r.val[dj]);
+      if (!d.toLowerCase().includes(fam.label.toLowerCase().slice(0, 14))) r.val[dj] = fam.label + (d ? " – " + d : "");
+    }
+    fam.used = true; drop.add(fam.r); filled++;
+  }
+  if (drop.size) R.rows = R.rows.filter(r => !drop.has(r));
+  return filled;
+}
 function compute() {
   const R = organize(sheets[active].aoa, OPTS);
-  const qj = qtyColumn(R), upj = upcColumn(R), cj = costColumn(R), pj = qj >= 0 ? packColumn(R, qj) : -1;
+  const upj = upcColumn(R), qj = qtyColumn(R), cj = costColumn(R), pj = qj >= 0 ? packColumn(R, qj) : -1;
+  const families = fillFamilies(R, upj, qj, cj);
   // Units in stock: the quantity, times the pack size when the quantity is in cases.
   const units = r => qj < 0 || typeof r.val[qj] !== "number" ? null
     : pj >= 0 && typeof r.val[pj] === "number" && r.val[pj] > 0 ? r.val[qj] * r.val[pj] : r.val[qj];
   const merged = mergeSameUpc(R, upj, units, cj);
   const all = sortRows(R);
   const low = r => !(units(r) >= MIN_QTY);
-  cur = { R, qj, pj, units, merged, kept: qj < 0 ? all : all.filter(r => !low(r)), rejected: qj < 0 ? [] : all.filter(low) };
+  cur = { R, qj, pj, units, merged, families, kept: qj < 0 ? all : all.filter(r => !low(r)), rejected: qj < 0 ? [] : all.filter(low) };
   cur.idj = idColumn(R);
   cur.upj = upj;
   cur.cj = cj;
@@ -1604,7 +1636,7 @@ function show() {
   const tab = (k, label, count) => `<button class="vtab" type="button" data-view="${k}" aria-pressed="${view === k}">${label} <span>${n(count)}</span></button>`;
   $("#info").innerHTML = `<div class="note">${note}</div>`
     + `<div class="views">${freshRows.length ? tab("new", "New", freshRows.length) : ""}${tab("kept", qj < 0 ? "All products" : "Kept", kept.length)}${rejected.length ? tab("rejected", "Under " + MIN_QTY, rejected.length) : ""}${banned.length ? tab("banned", "Banned", banned.length) : ""}${low.length ? tab("low", "Didn't pass", low.length) : ""}${notOn.length ? tab("noamz", "Not on Amazon", notOn.length) : ""}${mine.length ? tab("mine", "You rejected", mine.length) : ""}`
-    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} repeat listings combined` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : (cur.pj >= 0 ? ` · under ${MIN_QTY} units (“${esc(R.cols[qj].name)}” × “${esc(R.cols[cur.pj].name)}”) is rejected` : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`)}</span></div>`;
+    + `<span class="fname">${esc(fileName)}${cur.merged ? ` · ${n(cur.merged)} repeat listings combined` : ""}${cur.families ? ` · ${n(cur.families)} shades given their product's price` : ""}${qj < 0 ? " · no quantity column found, nothing rejected" : (cur.pj >= 0 ? ` · under ${MIN_QTY} units (“${esc(R.cols[qj].name)}” × “${esc(R.cols[cur.pj].name)}”) is rejected` : ` · under ${MIN_QTY} in “${esc(R.cols[qj].name)}” is rejected`)}</span></div>`;
 
   $("#tabs").hidden = sheets.length < 2;
   $("#tabs").innerHTML = sheets.map((s, i) => `<button class="tab" role="tab" type="button" data-i="${i}" aria-selected="${i === active}">${esc(s.name)}</button>`).join("");
