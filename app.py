@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 22
+VERSION = 23
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -872,7 +872,7 @@ function organize(aoa, o) {
   }
 
   if (o.types) cols.forEach((col, j) => {
-    if (/\b(upc|sku|ean|gtin|barcode|isbn|zip|phone)\b/i.test(col.name.replace(/_/g, " "))) return; // codes stay exactly as written
+    if (/\b(upc|ucc|scc|itf|sku|ean|gtin|barcode|isbn|zip|phone)\b/i.test(col.name.replace(/_/g, " "))) return; // codes stay exactly as written
     const vals = body.map(r => r.val[j]).filter(v => v != null);
     if (!vals.length) return;
     let dmy = false;
@@ -1682,7 +1682,8 @@ function show() {
     return ` <span class="pill dup" title="Listed ${r.others.length + 1} times in this file. Showing ${esc(line(r))}. Also: ${esc(r.others.map(line).join("; "))}">×${r.others.length + 1}</span>`;
   };
   const pics = (sheets[active] && sheets[active].images) || {}, hasPics = Object.keys(pics).length > 0;
-  const emptyPicCol = j => /\b(image|images|photo|picture|pic|img)\b/i.test(cname(R.cols[j])) && R.rows.filter(r => r.val[j] != null && r.val[j] !== "").length <= R.rows.length * 0.1;
+  // A photo/image column with no real pictures in it ("No photo", blanks) is hidden; real pictures show in the Photo column.
+  const emptyPicCol = j => /\b(image|images|photo|photos|picture|pic|img)\b/i.test(cname(R.cols[j])) && R.rows.filter(r => typeof r.val[j] === "string" && /^https?:\/\//i.test(r.val[j])).length <= R.rows.length * 0.1;
   const photoTd = r => `<td class="ph">${pics[r.src] ? `<img src="${pics[r.src]}" alt="">` : ""}</td>`;
   const cellHtml = (v, j) => {
     if (typeof v === "string" && /^https?:\/\/\S+$/i.test(v)) {
@@ -1692,11 +1693,14 @@ function show() {
     }
     return esc(fmt(v, R.cols[j]));
   };
-  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0) && !(hasPics && emptyPicCol(j)));
+  // Total qty (units the 300 rule uses) always sits right after the UPC; the quantity column itself is hidden unless it counts cases.
+  const QTY = -1, showQty = cur.qj >= 0;
+  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0) && !emptyPicCol(j) && !(showQty && j === cur.qj && cur.pj < 0));
+  if (showQty) shownCols.unshift(QTY);
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
-  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${hasPics ? "<th>Photo</th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
-    `<tr>${act ? actTd(r) : ""}${hasPics ? photoTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => [r.val[j], j]).map(([v, j]) => `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${cellHtml(v, j)}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${hasPics ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${hasPics ? "<th>Photo</th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => j === QTY ? "<th>Total qty</th>" : `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
+    `<tr>${act ? actTd(r) : ""}${hasPics ? photoTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => j === QTY ? [cur.units(r), QTY] : [r.val[j], j]).map(([v, j]) => j === QTY ? `<td class="n"><b>${v == null ? "" : n(v)}</b></td>` : `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${cellHtml(v, j)}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${hasPics ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => j === QTY ? "<td></td>" : `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
 
