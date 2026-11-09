@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 23
+VERSION = 24
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1558,6 +1558,8 @@ function compute() {
   cur.idj = idColumn(R);
   cur.upj = upj;
   cur.cj = cj;
+  // The supplier's expiration date ("EXP", "Best By", "BIUB"), shown in place of the sales rank.
+  cur.ej = R.cols.findIndex(c => /\b(exp|exp date|expiry|expiration|expires|best ?by|best before|bbd|biub|use by|sell by)\b/i.test(cname(c)));
 }
 
 /* ---------- remembering products ---------- */
@@ -1663,12 +1665,12 @@ function show() {
     const a = amzOf(r);
     if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
-    return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
+    return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}${a.rank ? " · Sales rank " + n(a.rank) : ""}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
       + (e && e.offer
         ? `<td class="n" title="Pay at most this per unit to make ${Math.round(MIN_ROI * 100)}% ROI (${usd(e.maxListing)} for the whole Amazon listing)"><b>${usd(e.maxUnit)}</b><span class="sub">per unit</span><button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `listing = ${e.mult} units` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button></td>`
         : `<td class="n">${e && e.cost != null ? usd(e.cost) + `<button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `${e.mult} × ${usd(e.unit)}` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button>` : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`)
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
-      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && !e.offer && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="n">${a.rank ? n(a.rank) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
+      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && !e.offer && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="d" title="${a.rank ? "Sales rank " + n(a.rank) : "No sales rank"}">${cur.ej >= 0 && r.val[cur.ej] != null ? esc(fmt(r.val[cur.ej], R.cols[cur.ej])) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
   };
   const dupTag = r => {
     if (r.summed) {
@@ -1695,11 +1697,11 @@ function show() {
   };
   // Total qty (units the 300 rule uses) always sits right after the UPC; the quantity column itself is hidden unless it counts cases.
   const QTY = -1, showQty = cur.qj >= 0;
-  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0) && !emptyPicCol(j) && !(showQty && j === cur.qj && cur.pj < 0));
+  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0) && !emptyPicCol(j) && !(showQty && j === cur.qj && cur.pj < 0) && !(amzCols && j === cur.ej));
   if (showQty) shownCols.unshift(QTY);
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
-  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${hasPics ? "<th>Photo</th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Sales rank</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => j === QTY ? "<th>Total qty</th>" : `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
+  $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${hasPics ? "<th>Photo</th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Best by</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => j === QTY ? "<th>Total qty</th>" : `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
     `<tr>${act ? actTd(r) : ""}${hasPics ? photoTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => j === QTY ? [cur.units(r), QTY] : [r.val[j], j]).map(([v, j]) => j === QTY ? `<td class="n"><b>${v == null ? "" : n(v)}</b></td>` : `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${cellHtml(v, j)}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${hasPics ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => j === QTY ? "<td></td>" : `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
