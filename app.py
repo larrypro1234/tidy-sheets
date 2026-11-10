@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 25
+VERSION = 26
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -872,7 +872,7 @@ function organize(aoa, o) {
   }
 
   if (o.types) cols.forEach((col, j) => {
-    if (/\b(upc|ucc|scc|itf|sku|ean|gtin|barcode|isbn|zip|phone)\b/i.test(col.name.replace(/_/g, " "))) return; // codes stay exactly as written
+    if (/(upc|ucc|scc|itf|ean|gtin|barcode|isbn)|\b(sku|zip|phone)\b/i.test(col.name.replace(/_/g, " "))) return; // codes stay exactly as written
     const vals = body.map(r => r.val[j]).filter(v => v != null);
     if (!vals.length) return;
     let dmy = false;
@@ -887,7 +887,7 @@ function organize(aoa, o) {
       if (curs.length >= nums.length / 2) { col.type = "currency"; col.sym = mode(curs.map(p => p.cur)); }
       else if (nums.filter(p => p.pct).length >= nums.length / 2) col.type = "percent";
       else col.type = "number";
-      col.plain = /\b(id|code|zip|postcode|year|no|num|number|phone|ref)\b|#/i.test(col.name.replace(/_/g, " "));
+      col.plain = /\b(id|item|code|zip|postcode|year|no|num|number|phone|ref)\b|#/i.test(col.name.replace(/_/g, " "));
       body.forEach(r => {
         const v = r.val[j]; const p = parseNum(v); if (!p) return;
         let n = p.n;
@@ -1222,7 +1222,13 @@ function upcDigits(v) {
 const normUpc = v => { const d = upcDigits(v).replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
 // Column names compared with underscores and run-together words split, so "UPC_CD", "AV_QTY" and "UPCCodeList" are recognized.
 const cname = c => String(c.name).replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
-function upcColumn(R) { return R.cols.findIndex(c => /\b(upc|ean|gtin|barcode)\b/i.test(cname(c))); }
+// The product UPC column: "UPC", "Item UPC", also run-together names like "UPCCHKDIG"; never a case barcode ("CASUPC", "Case UPC").
+function upcColumn(R) {
+  const names = R.cols.map(cname), isCase = nm => /\b(cas|case|cases|cs|ctn|carton|inner|master|pallet)/i.test(nm);
+  const pick = re => names.findIndex(nm => re.test(nm) && !isCase(nm));
+  const j = [pick(/\b(upc|ean|gtin|barcode)\b/i), pick(/\b(upc|ean|gtin)/i)].find(x => x >= 0);
+  return j ?? names.findIndex(nm => /\b(upc|ean|gtin|barcode)\b/i.test(nm));
+}
 function amzOf(r) {
   if (cur.upj < 0) return undefined;
   const k = normUpc(r.val[cur.upj]);
