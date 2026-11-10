@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 24
+VERSION = 25
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -895,6 +895,22 @@ function organize(aoa, o) {
         r.val[j] = n;
         if (fmt(n, col) !== v) rep.nums++;
       });
+    } else if (/\b(qty|quantity|ava?i?l\w*|stock|on ?hand|units|inventory|oh)\b/i.test(col.name.replace(/_/g, " "))) {
+      // A quantity column with notes in some cells ("5000+", "4000 FOB CA", "5000+ February"): the number counts,
+      // the note is kept and shown next to Total qty.
+      const lead = v => v.match(/^\s*(-?[\d,]+(?:\.\d+)?)\s*(\+)?\s*(.*)$/s);
+      const ok = vals.filter(v => { const m = lead(v); return m && /\d/.test(m[1]); });
+      if (ok.length / vals.length < 0.8) return;
+      col.type = "number";
+      body.forEach(r => {
+        const v = r.val[j], m = v == null ? null : lead(v);
+        if (!m) return;
+        const n = parseFloat(m[1].replace(/,/g, "")), note = ((m[2] ? "+ " : "") + m[3]).trim();
+        if (isNaN(n)) return;
+        r.val[j] = n;
+        if (note) (r.qtyNotes = r.qtyNotes || {})[j] = note;
+        rep.nums++;
+      });
     }
   });
 
@@ -1219,7 +1235,14 @@ function amzOf(r) {
 function costColumn(R) {
   const num = R.cols.map((c, j) => j).filter(j => ["number", "currency"].includes(R.cols[j].type));
   const find = re => num.find(j => re.test(cname(R.cols[j])) && !/compar|retail|msrp|amazon|list/i.test(cname(R.cols[j])));
-  return find(/\blow ?sell\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
+  const base = find(/\blow ?sell\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
+  // A price that includes tariff, duty or delivery ("+ Tariff", "Landed") is what you really pay, when it's at least the base price.
+  const extra = num.find(j => j !== base && /\b(tariff|tariffs|landed|duty|duties|delivered|freight incl\w*)\b/i.test(cname(R.cols[j])));
+  if (base >= 0 && extra != null) {
+    const both = R.rows.filter(r => typeof r.val[base] === "number" && typeof r.val[extra] === "number" && r.val[base] > 0);
+    if (both.length && both.filter(r => r.val[extra] >= r.val[base] - 0.001).length >= both.length * 0.8) return extra;
+  }
+  return base;
 }
 // Profit and ROI for one product: Amazon price minus referral fee, FBA fee and your cost.
 // How many items an Amazon listing holds ("Pack of 12"), from Keepa's number of items, else its title.
@@ -1702,7 +1725,7 @@ function show() {
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
   $("#sheet").innerHTML = `<table><thead><tr>${act ? "<th></th>" : ""}${hasPics ? "<th>Photo</th>" : ""}${badge ? "<th></th>" : ""}${reason ? `<th>${view === "banned" ? "Banned for" : "Why"}</th>` : ""}${amzCols ? "<th>ASIN</th><th>Amazon price</th><th>" + (offerMode() ? "Max offer" : "Our cost") + "</th><th>Profit</th><th>ROI</th><th>Best by</th><th title='Most bought in one month, past 12 months'>Best month</th>" : ""}${shownCols.map(j => j === QTY ? "<th>Total qty</th>" : `<th>${esc(R.cols[j].name)}</th>`).join("")}</tr></thead><tbody>${shown.map(r =>
-    `<tr>${act ? actTd(r) : ""}${hasPics ? photoTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => j === QTY ? [cur.units(r), QTY] : [r.val[j], j]).map(([v, j]) => j === QTY ? `<td class="n"><b>${v == null ? "" : n(v)}</b></td>` : `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${cellHtml(v, j)}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${hasPics ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => j === QTY ? "<td></td>" : `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
+    `<tr>${act ? actTd(r) : ""}${hasPics ? photoTd(r) : ""}${badge ? `<td>${isNew(r) ? '<span class="pill">NEW</span>' : ""}</td>` : ""}${reason ? `<td><span class="pill bad">${esc(reasonOf(r))}</span></td>` : ""}${amzCols ? amzTd(r) : ""}${shownCols.map(j => j === QTY ? [cur.units(r), QTY] : [r.val[j], j]).map(([v, j]) => j === QTY ? `<td class="n"><b>${v == null ? "" : n(v)}</b>${r.qtyNotes && r.qtyNotes[cur.qj] ? `<span class="sub">${esc(r.qtyNotes[cur.qj])}</span>` : ""}</td>` : `<td class="${typeof v === "string" ? (/\s/.test(v) ? (v.length > 24 ? "w" : "") : (v.length <= 20 ? "nw" : "")) : cls(R.cols[j].type)}">${cellHtml(v, j)}${j === cur.upj && r.others ? dupTag(r) : ""}</td>`).join("")}</tr>`).join("")}</tbody>${view === "kept" && R.totalRows.length ? `<tfoot>${R.totalRows.map(r => `<tr>${act ? "<td></td>" : ""}${hasPics ? "<td></td>" : ""}${badge ? "<td></td>" : ""}${amzCols ? "<td></td><td></td><td></td><td></td><td></td><td></td><td></td>" : ""}${shownCols.map(j => j === QTY ? "<td></td>" : `<td>${esc(r.val[j] ?? "")}</td>`).join("")}</tr>`).join("")}</tfoot>` : ""}</table>${rows.length > LIMIT ? `<div class="more">Showing the first ${n(LIMIT)} of ${n(rows.length)} rows.</div>` : ""}`;
   $("#sheet").scrollTop = keepScroll;
 }
 
