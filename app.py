@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 27
+VERSION = 28
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1602,7 +1602,7 @@ function compute() {
   cur.upj = upj;
   cur.cj = cj;
   // The supplier's expiration date ("EXP", "Best By", "BIUB"), shown in place of the sales rank.
-  cur.ej = R.cols.findIndex(c => /\b(exp|exp date|expiry|expiration|expires|best ?by|best before|bbd|biub|use by|sell by)\b/i.test(cname(c)));
+  cur.ej = R.cols.findIndex(c => /\b(exp|expir\w*|exp dt|best ?by|best before|best if used( by)?|bbd|biub|used? by|sell by)\b/i.test(cname(c)));
 }
 
 /* ---------- remembering products ---------- */
