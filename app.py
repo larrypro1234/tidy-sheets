@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 28
+VERSION = 29
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -304,11 +304,11 @@ def catalog_post(url, payload):
 
 
 DOWNLOADS = Path.home() / "Downloads"
-SHEET_TYPES = {".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".ods"}
+SHEET_TYPES = {".xlsx", ".xlsm", ".xls", ".csv", ".tsv", ".ods", ".pdf"}
 
 
 def recent_downloads(days=7, limit=8):
-    """Spreadsheets saved to Downloads in the last week, newest first."""
+    """Spreadsheets and PDF price lists saved to Downloads in the last week, newest first."""
     try:
         files = [f for f in DOWNLOADS.iterdir()
                  if f.is_file() and f.suffix.lower() in SHEET_TYPES and not f.name.startswith(("~$", "."))]
@@ -322,7 +322,7 @@ def recent_downloads(days=7, limit=8):
 
 
 def download_bytes(name):
-    """One spreadsheet straight from Downloads (no folders, only spreadsheet types)."""
+    """One spreadsheet or PDF straight from Downloads (no folders, only those types)."""
     f = DOWNLOADS / name
     if "/" in name or "\\" in name or name.startswith(".") or f.suffix.lower() not in SHEET_TYPES or not f.is_file():
         return None
@@ -652,6 +652,7 @@ td.w { min-width: 240px; }
 td.nw { white-space: nowrap; }
 td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
 .more { padding: 12px; text-align: center; color: var(--muted); font-size: 12.5px; }
+#busy { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); z-index: 50; background: var(--ink); color: var(--bg); padding: 8px 14px; border-radius: var(--r); font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.2); max-width: calc(100vw - 32px); }
 </style>
 
 <div class="wrap">
@@ -707,14 +708,15 @@ td.d { font-family: var(--font-data); font-size: 12.5px; white-space: nowrap; }
     </form>
     <div id="histOut"><p class="note">Every product in every file you upload is recorded here: which company offered it, when, our cost and qty.</p></div>
   </section>
-  <input type="file" id="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.tsv,.txt,.numbers" hidden>
+  <div id="busy" role="status" hidden></div>
+  <input type="file" id="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.tsv,.txt,.numbers,.pdf" hidden>
 
   <label class="drop" id="drop" for="file">
     <span class="btn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4M6 10l6-6 6 6M4 20h16"/></svg>
       Upload spreadsheet
     </span>
-    <p id="dropText">Excel, CSV or ODS. You'll get it back cleaned up and sorted, and any product with less than 300 in stock is rejected. Products you haven't seen before from that vendor are marked new.</p>
+    <p id="dropText">Excel, CSV, ODS or a PDF price list. You'll get it back cleaned up and sorted, and any product with less than 300 in stock is rejected. Products you haven't seen before from that vendor are marked new.</p>
   </label>
 
   <div class="info" id="info" hidden></div>
@@ -1240,8 +1242,9 @@ function amzOf(r) {
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
   const num = R.cols.map((c, j) => j).filter(j => ["number", "currency"].includes(R.cols[j].type));
-  const find = re => num.find(j => re.test(cname(R.cols[j])) && !/compar|retail|msrp|amazon|list/i.test(cname(R.cols[j])));
-  const base = find(/\blow ?sell\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
+  const find = re => num.find(j => re.test(cname(R.cols[j])) && !/compar|retail|msrp|amazon|list|\borig\w*|\bwas\b|\bregular\b|\bsrp\b/i.test(cname(R.cols[j])));
+  // "Sell Price" / "Offer Price" / "Asking Price" is the supplier's price to you; "Orig Cost" next to it is the old price.
+  const base = find(/\blow ?sell\b/i) ?? find(/\b(sell|selling|offer|asking|special|deal|closeout)\s*(price|cost)\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
   // A price that includes tariff, duty or delivery ("+ Tariff", "Landed") is what you really pay, when it's at least the base price.
   const extra = num.find(j => j !== base && /\b(tariff|tariffs|landed|duty|duties|delivered|freight incl\w*)\b/i.test(cname(R.cols[j])));
   if (base >= 0 && extra != null) {
@@ -1491,7 +1494,7 @@ function qtyColumn(R) {
   const find = re => num.find(j => re.test(nm(j)) && !notQty.test(nm(j)));
   // "ava?i?l…" also catches misspellings like "Avalible".
   return find(/\b(av|ava?i?l\w*)\b.*\b(qty|quantity)\b|\b(qty|quantity)\b.*\b(av|ava?i?l\w*)\b/i)  // "AV QTY", "Qty. Available"
-    ?? find(/\b(ava?i?l\w*|in ?stock|on ?hand)\b/i)                                                       // "IN STOCK", "On Hand", "Cases Avalible"
+    ?? find(/\b(ava?i?l\w*|in ?stock|on ?hand|oh|qoh|soh)\b/i)                                           // "IN STOCK", "On Hand", "TTL OH", "Cases Avalible"
     ?? find(/\b(qty|quantity)\b/i)
     ?? find(/\b(stock|units|inventory)\b/i) ?? -1;
 }
@@ -1803,11 +1806,174 @@ function sheetPictures(buf, wb) {
   } catch (e) { /* show the sheet without pictures */ }
   return out;
 }
+
+/* ---------- PDF price lists ---------- */
+// pdf.js is loaded only when a PDF is opened.
+const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
+let pdfjsP = null;
+function loadPdfJs() {
+  return pdfjsP ||= new Promise((ok, bad) => {
+    const sc = document.createElement("script");
+    sc.src = PDFJS + "pdf.min.js";
+    sc.onload = () => { const lib = window.pdfjsLib; if (!lib) { pdfjsP = null; return bad(new Error("pdfjs")); } lib.GlobalWorkerOptions.workerSrc = PDFJS + "pdf.worker.min.js"; ok(lib); };
+    sc.onerror = () => { pdfjsP = null; sc.remove(); bad(new Error("pdfjs")); };
+    document.head.appendChild(sc);
+  });
+}
+function busy(text) { const b = $("#busy"); b.hidden = !text; b.textContent = text || ""; }
+// Turns the text of a PDF price list into rows and columns.
+// pages: [{ items: [{ s, x, y, w, h }] }] with y measured from the top of the page.
+// Returns { aoa, rows: [{ page, top, bottom }], cols: [{ name, x0, x1 }] } or null when no table is found.
+function pdfTable(pages) {
+  const HEAD = /\b(upc|ean|gtin|barcode|description|desc|item|sku|qty|quantity|price|cost|pack|brand|msrp|case|cases|avail\w*|product|title|retail|image|picture|photo|mfg|manufacturer|on ?hand|oh|unit|units|size|fob|category|exp\w*|best|lot|stock|total|vendor|style|color|model|wholesale|asking|offer)\b/i;
+  const NUMERIC = /^[\s$€£#%,.\-–()\/\d]*\d[\s$€£#%,.\-–()\/\d]*$/;
+  const toLines = items => {
+    const sorted = items.filter(i => i.s.trim()).sort((a, b) => a.y - b.y || a.x - b.x), lines = [];
+    for (const it of sorted) {
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(it.y - last.y) <= Math.max(2, Math.min(it.h, last.h) * 0.45)) last.items.push(it);
+      else lines.push({ y: it.y, h: it.h || 8, items: [it] });
+    }
+    for (const l of lines) l.items.sort((a, b) => a.x - b.x);
+    return lines;
+  };
+  // A header line names at least 3 columns and has no numbers in it.
+  const headerAt = lines => {
+    for (let i = 0; i < lines.length; i++) {
+      const its = lines[i].items, words = its.filter(t => HEAD.test(t.s)).length;
+      if (its.length >= 3 && words >= 3 && words >= its.length * 0.5 && !its.some(t => /\d{4,}/.test(t.s))) {
+        const h = lines[i].h, band = lines.filter(l => Math.abs(l.y - lines[i].y) <= h * 1.7 && l.items.every(t => !NUMERIC.test(t.s)));
+        return { band, bottom: Math.max(...band.map(l => l.y + l.h)) };
+      }
+    }
+    return null;
+  };
+  // Header words stacked on top of each other ("Qty" over "Available") are one column.
+  const columnsOf = band => {
+    const words = band.flatMap(l => l.items).map(t => ({ ...t, x1: t.x + t.w })).sort((a, b) => a.x - b.x), groups = [];
+    for (const w of words) {
+      const g = groups.find(g => w.x < g.x1 - 1 && w.x1 > g.x0 + 1 && !g.words.some(o => Math.abs(o.y - w.y) < 2));
+      if (g) { g.words.push(w); g.x0 = Math.min(g.x0, w.x); g.x1 = Math.max(g.x1, w.x1); }
+      else groups.push({ x0: w.x, x1: w.x1, words: [w] });
+    }
+    groups.sort((a, b) => a.x0 - b.x0);
+    return groups.map((g, i) => ({
+      name: g.words.sort((a, b) => a.y - b.y || a.x - b.x).map(w => w.s.trim()).join(" ").replace(/\s+/g, " "),
+      x0: i ? (groups[i - 1].x1 + g.x0) / 2 : -1e9, x1: i < groups.length - 1 ? (g.x1 + groups[i + 1].x0) / 2 : 1e9,
+      cx: (g.x0 + g.x1) / 2,
+    }));
+  };
+  const colOf = (cols, t) => {
+    let best = -1, most = 0;
+    cols.forEach((c, i) => { const o = Math.min(c.x1, t.x + t.w) - Math.max(c.x0, t.x); if (o > most) { most = o; best = i; } });
+    return best >= 0 ? best : cols.reduce((b, c, i) => Math.abs(c.cx - (t.x + t.w / 2)) < Math.abs(cols[b].cx - (t.x + t.w / 2)) ? i : b, 0);
+  };
+  let cols = null;
+  const out = [], rows = [];
+  pages.forEach((pg, p) => {
+    let lines = toLines(pg.items);
+    const hd = headerAt(lines);
+    if (hd) { if (!cols) cols = columnsOf(hd.band); lines = lines.filter(l => l.y > hd.bottom - 1); }
+    if (!cols) return;
+    lines = lines.filter(l => !/^\s*page\s*\d+(\s*(of|\/)\s*\d+)?\s*$/i.test(l.items.map(t => t.s).join(" ")));
+    const placed = lines.map(l => { const by = {}; for (const t of l.items) (by[colOf(cols, t)] ||= []).push(t); return { ...l, by }; });
+    // A product's main line fills at least 3 columns, 2 of them with plain numbers (qty, price, UPC); wrapped text lines don't.
+    const anchors = placed.filter(l => Object.keys(l.by).length >= Math.min(3, cols.length) && Object.values(l.by).filter(ts => ts.every(t => NUMERIC.test(t.s))).length >= Math.min(2, cols.length));
+    if (!anchors.length) return;
+    const parts = anchors.map(a => ({ a, lines: [a] }));
+    for (const l of placed) {
+      if (anchors.includes(l)) continue;
+      let best = null, d = Infinity;
+      for (const r of parts) { const dd = Math.abs(r.a.y - l.y); if (dd < d) { d = dd; best = r; } }
+      if (best && d <= Math.max(best.a.h, l.h) * 5) best.lines.push(l);
+    }
+    parts.forEach((r, i) => {
+      r.lines.sort((a, b) => a.y - b.y);
+      const cells = cols.map((c, j) => r.lines.flatMap(l => l.by[j] || []).map(t => t.s.trim()).join(" ").replace(/\s+/g, " ").trim() || null);
+      const top = Math.min(r.lines[0].y, i ? (parts[i - 1].a.y + r.a.y) / 2 : r.lines[0].y - r.a.h);
+      const bottom = Math.max(r.lines[r.lines.length - 1].y + r.lines[r.lines.length - 1].h, i < parts.length - 1 ? (r.a.y + parts[i + 1].a.y) / 2 : r.a.y + r.a.h * 2);
+      out.push(cells); rows.push({ page: p, top: Math.min(top, r.lines[0].y), bottom });
+    });
+  });
+  // A price list has UPCs (or other long item numbers); a flyer or brochure doesn't.
+  if (!cols || !out.length || out.filter(r => r.some(c => c && /\d{8,}/.test(c.replace(/[\s-]/g, "")))).length < out.length * 0.3) return null;
+  return { aoa: [cols.map(c => c.name), ...out], rows, cols };
+}
+
+// Where each picture sits on a PDF page (top-left origin, PDF points).
+async function pdfImageBoxes(lib, pg, vp) {
+  const ops = await pg.getOperatorList(), O = lib.OPS, boxes = [], stack = [];
+  const mul = (a, b) => [a[0] * b[0] + a[2] * b[1], a[1] * b[0] + a[3] * b[1], a[0] * b[2] + a[2] * b[3], a[1] * b[2] + a[3] * b[3], a[0] * b[4] + a[2] * b[5] + a[4], a[1] * b[4] + a[3] * b[5] + a[5]];
+  let m = [1, 0, 0, 1, 0, 0];
+  const PAINT = new Set([O.paintImageXObject, O.paintInlineImageXObject, O.paintJpegXObject, O.paintImageXObjectRepeat].filter(x => x != null));
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i], a = ops.argsArray[i];
+    if (fn === O.save) stack.push(m);
+    else if (fn === O.restore) m = stack.pop() || m;
+    else if (fn === O.transform) m = mul(m, a);
+    else if (fn === O.paintFormXObjectBegin) { stack.push(m); if (Array.isArray(a && a[0]) && a[0].length === 6) m = mul(m, a[0]); }
+    else if (fn === O.paintFormXObjectEnd) m = stack.pop() || m;
+    else if (PAINT.has(fn)) {
+      const pts = [[0, 0], [1, 0], [0, 1], [1, 1]].map(([x, y]) => vp.convertToViewportPoint(m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]));
+      const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+      boxes.push({ x0: Math.min(...xs), x1: Math.max(...xs), y0: Math.min(...ys), y1: Math.max(...ys) });
+    }
+  }
+  return boxes.filter(b => b.x1 - b.x0 >= 8 && b.y1 - b.y0 >= 8 && b.x1 - b.x0 < vp.width * 0.4);
+}
+// A PDF price list becomes one sheet: its table's rows, plus each row's product picture.
+async function pdfSheets(buf, name) {
+  busy("Opening PDF…");
+  const lib = await loadPdfJs();
+  const doc = await lib.getDocument({ data: new Uint8Array(buf) }).promise, pages = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    busy(`Reading PDF page ${n} of ${doc.numPages}…`);
+    const pg = await doc.getPage(n), vp = pg.getViewport({ scale: 1 }), tc = await pg.getTextContent();
+    pages.push({ pg, vp, items: tc.items.filter(i => i.str && i.str.trim()).map(i => {
+      const [x, y] = vp.convertToViewportPoint(i.transform[4], i.transform[5]), h = i.height || 8;
+      return { s: i.str, x, y: y - h, w: i.width, h };
+    }) });
+  }
+  const t = pdfTable(pages);
+  if (!t) throw new Error("notable");
+  const images = {};
+  for (let p = 0; p < pages.length; p++) {
+    const mine = t.rows.map((r, k) => ({ r, k })).filter(x => x.r.page === p);
+    if (!mine.length) continue;
+    let boxes;
+    try { boxes = await pdfImageBoxes(lib, pages[p].pg, pages[p].vp); } catch (e) { continue; }
+    const hits = [];
+    for (const b of boxes) {
+      const cy = (b.y0 + b.y1) / 2, hit = mine.find(x => cy >= x.r.top && cy <= x.r.bottom);
+      if (hit && !images[hit.k + 2] && !hits.some(h => h.k === hit.k)) hits.push({ k: hit.k, b });
+    }
+    if (!hits.length) continue;
+    busy(`Getting product photos, page ${p + 1} of ${pages.length}…`);
+    try {
+      const S = 2, vp2 = pages[p].pg.getViewport({ scale: S }), cv = document.createElement("canvas");
+      cv.width = Math.ceil(vp2.width); cv.height = Math.ceil(vp2.height);
+      const ctx = cv.getContext("2d");
+      ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, cv.width, cv.height);
+      await pages[p].pg.render({ canvasContext: ctx, viewport: vp2 }).promise;
+      for (const { k, b } of hits) {
+        const w = (b.x1 - b.x0) * S, h = (b.y1 - b.y0) * S, f = Math.min(1, 160 / Math.max(w, h));
+        const out = document.createElement("canvas");
+        out.width = Math.max(1, Math.round(w * f)); out.height = Math.max(1, Math.round(h * f));
+        out.getContext("2d").drawImage(cv, b.x0 * S, b.y0 * S, w, h, 0, 0, out.width, out.height);
+        images[k + 2] = out.toDataURL("image/jpeg", 0.82);   // row 1 is the header, so the first product is row 2
+      }
+    } catch (e) { /* keep the rows without pictures */ }
+  }
+  return [{ name: name.replace(/\.pdf$/i, "") || "PDF", images: Object.keys(images).length ? images : null, aoa: t.aoa }];
+}
 async function loadFile(f) {
   if (!f) return;
   const ext = (f.name.split(".").pop() || "").toLowerCase();
   let buf = null;
   try {
+    if (ext === "pdf" || /^%PDF/.test(new TextDecoder().decode(new Uint8Array(await f.slice(0, 5).arrayBuffer())))) {
+      try { sheets = await pdfSheets(await f.arrayBuffer(), f.name); } finally { busy(""); }
+    } else {
     const wb = ["csv", "tsv", "txt"].includes(ext)
       ? XLSX.read(await f.text(), { type: "string", raw: true })
       : XLSX.read(buf = await f.arrayBuffer(), { type: "array" });
@@ -1822,10 +1988,16 @@ async function loadFile(f) {
     }
     const list = wb.SheetNames.map(s => ({ name: s, images: pics[s] || null, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
     if (!list.length) throw new Error("empty");
-    sheets = list; active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept"; uploadDay = localDay();
+    sheets = list;
+    }
+    active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept"; uploadDay = localDay();
   } catch (e) {
     $("#drop").hidden = false; $("#result").hidden = true; $("#info").hidden = true; $("#topBtn").hidden = true; $("#vendorBar").hidden = true; $("#bans").hidden = true; $("#amz").hidden = true;
-    $("#dropText").innerHTML = `<span class="err">“${esc(f.name)}” couldn't be read.</span> Try an .xlsx, .xls, .ods or .csv file that isn't password-protected.`;
+    $("#dropText").innerHTML = e && e.message === "notable"
+      ? `<span class="err">“${esc(f.name)}” isn't laid out as a table</span> (no rows with UPCs and prices were found), so the app can't read it. Send it to Claude to turn it into a spreadsheet.`
+      : e && e.message === "pdfjs"
+      ? `<span class="err">The PDF reader didn't load.</span> Check your internet connection and try again.`
+      : `<span class="err">“${esc(f.name)}” couldn't be read.</span> Try an .xlsx, .xls, .ods, .csv or PDF file that isn't password-protected.`;
     return;
   }
   lastWrite = null;
