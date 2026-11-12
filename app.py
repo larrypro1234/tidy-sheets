@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 26
+VERSION = 27
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1235,7 +1235,7 @@ function amzOf(r) {
   if (!k) return amz.map.size ? 0 : undefined; // no UPC: can't be matched on Amazon
   const e = amz.map.get(k);
   if (!e) return undefined;
-  return e.length === 1 ? 0 : { day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined, count: e.length >= 9 ? e[8] : null };
+  return e.length === 1 ? 0 : { day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined, count: e.length >= 9 ? e[8] : null, drops30: e.length >= 11 ? e[9] : null, drops90: e.length >= 11 ? e[10] : null };
 }
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
@@ -1307,11 +1307,21 @@ function failReason(r) {
   if (a.price < MIN_AMZ_PRICE) return "Under $" + (MIN_AMZ_PRICE / 100).toFixed(2);
   if (!a.rank) return "No sales rank";
   if (a.rank > MAX_RANK) return "Rank over " + n(MAX_RANK);
-  if (a.sold !== undefined && !(a.sold >= MIN_SOLD)) return `Never ${MIN_SOLD}+ sold/month`;
+  // Amazon's "bought in past month" is missing on many listings that sell well. Without it, sales are estimated from
+  // Keepa's sales-rank drops; with neither, sales don't reject the product (the rank rule decides).
+  if (a.sold !== undefined && !(a.sold >= MIN_SOLD)) {
+    const est = salesEstimate(a);
+    if (est != null && est < MIN_SOLD) return `Under ${MIN_SOLD} sales/month`;
+  }
   const e = econ(r);
   if (e && e.offer) return e.maxUnit > 0 ? null : "No room for profit";
   if (e && e.roi != null && e.roi < MIN_ROI) return "ROI " + Math.round(e.roi * 100) + "%";
   return null;
+}
+// Monthly sales estimated from how often the sales rank dropped (each drop is roughly one sale), or null when Keepa has no count.
+function salesEstimate(a) {
+  const v = [a.drops30, typeof a.drops90 === "number" && a.drops90 >= 0 ? a.drops90 / 3 : null].filter(x => typeof x === "number" && x >= 0);
+  return v.length ? Math.round(Math.max(...v)) : null;
 }
 // Best month in the past year from Amazon's "bought in past month" figure (Keepa monthlySold and its history).
 const KEEPA_EPOCH_MIN = 21564000; // Keepa time is minutes since 2011-01-01
@@ -1321,6 +1331,10 @@ function bestMonth(p) {
   const h = Array.isArray(p.monthlySoldHistory) ? p.monthlySoldHistory : [];
   for (let i = 0; i + 1 < h.length; i += 2) if ((h[i] + KEEPA_EPOCH_MIN) * 60000 >= since && h[i + 1] > best) best = h[i + 1];
   return best;
+}
+function rankDrops(p, days) {
+  const v = p.stats && p.stats["salesRankDrops" + days];
+  return typeof v === "number" && v >= 0 ? v : -1;
 }
 function listingCount(p) {
   return Math.max(...[p.numberOfItems, p.packageQuantity].filter(v => typeof v === "number" && v > 0), titlePack(p.title), 1);
@@ -1431,10 +1445,10 @@ async function scan(refreshKept) {
         const price = main.length ? Math.min(...main) : (pos(curv[1]) ? curv[1] : 0);
         const ref = [p.referralFeePercentage, p.referralFeePercent].find(v => typeof v === "number" && v > 0) ?? null;
         const fba = p.fbaFees && typeof p.fbaFees.pickAndPackFee === "number" && p.fbaFees.pickAndPackFee >= 0 ? p.fbaFees.pickAndPackFee : null;
-        const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 200), ref, fba, bestMonth(p), listingCount(p)];
+        const entry = [today, p.asin, price, typeof curv[3] === "number" && curv[3] > 0 ? curv[3] : 0, String(p.title || "").slice(0, 200), ref, fba, bestMonth(p), listingCount(p), rankDrops(p, 30), rankDrops(p, 90)];
         for (const c of codes) if (!hit.has(c)) hit.set(c, entry);
       }
-      if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 200), null, null, bestMonth(p), listingCount(p)]); }
+      if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 200), null, null, bestMonth(p), listingCount(p), rankDrops(p, 30), rankDrops(p, 90)]); }
       for (const b of batch) { const e = hit.get(b.k); amzPut(b.k, e || [today]); if (e) found++; }
       done += batch.length; i += BATCH;
       show();
@@ -1699,7 +1713,13 @@ function show() {
         ? `<td class="n" title="Pay at most this per unit to make ${Math.round(MIN_ROI * 100)}% ROI (${usd(e.maxListing)} for the whole Amazon listing)"><b>${usd(e.maxUnit)}</b><span class="sub">per unit</span><button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `listing = ${e.mult} units` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button></td>`
         : `<td class="n">${e && e.cost != null ? usd(e.cost) + `<button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `${e.mult} × ${usd(e.unit)}` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button>` : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`)
       + `<td class="n"${e ? ` title="Amazon fees ${usd(e.fees)}${e.est ? " (estimated)" : ""}"` : ""}>${e ? usd(e.profit) + star : ""}</td>`
-      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && !e.offer && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="d" title="${a.rank ? "Sales rank " + n(a.rank) : "No sales rank"}">${cur.ej >= 0 && r.val[cur.ej] != null ? esc(fmt(r.val[cur.ej], R.cols[cur.ej])) : ""}</td><td class="n">${a.sold === undefined ? "" : a.sold ? n(a.sold) + "+" : "none"}</td>`;
+      + `<td class="n"><b class="${e && e.roi != null && e.roi >= MIN_ROI ? "ok" : "rej"}">${e && e.roi != null ? Math.round(e.roi * 100) + "%" : ""}</b>${e && !e.offer && e.roi >= 3 ? `<span class="sub warn" title="ROI this high is usually a pack-size mix-up. Check the Amazon listing and fix the count under Our cost.">check pack</span>` : ""}</td><td class="d" title="${a.rank ? "Sales rank " + n(a.rank) : "No sales rank"}">${cur.ej >= 0 && r.val[cur.ej] != null ? esc(fmt(r.val[cur.ej], R.cols[cur.ej])) : ""}</td>${(() => {
+        if (a.sold === undefined) return `<td class="n"></td>`;
+        if (a.sold) return `<td class="n">${n(a.sold)}+</td>`;
+        const est = salesEstimate(a);
+        return est != null ? `<td class="n" title="Amazon shows no 'bought in past month'; estimated from Keepa sales-rank drops">~${n(est)}/mo <span class="sub">est.</span></td>`
+          : `<td class="n" title="Amazon shows no 'bought in past month' and Keepa has no rank-drop count; the sales rank decides">no data</td>`;
+      })()}`;
   };
   const dupTag = r => {
     if (r.summed) {

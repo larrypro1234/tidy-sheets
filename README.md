@@ -11,7 +11,7 @@ A small app for vendor inventory spreadsheets. Upload a vendor's file and it:
 - **Remembers each company**: picked from the start of the file name (e.g. `BAZ-…` → The Bazaar), or chosen from the Company menu.
 - **Applies that company's bans**: any product whose text contains a banned word or brand.
 - **Marks new products**: ones you haven't seen from that company before.
-- **Scan on Keepa**: checks each remaining UPC on Amazon and keeps only products that are on Amazon, at least $6.99, at least 40% ROI, a sales rank of 350,000 or better, and 50+ bought in at least one month of the past year (from Amazon's "bought in past month" figure). Products with no sales rank or no monthly sales are rejected.
+- **Scan on Keepa**: checks each remaining UPC on Amazon and keeps only products that are on Amazon, at least $6.99, at least 40% ROI, a sales rank of 350,000 or better, and 50+ bought in at least one month of the past year (from Amazon's "bought in past month" figure). Listings without that figure are judged by how often their sales rank dropped in the last 30/90 days (shown as "~N/mo est."), and are only rejected if that estimate is under 50; with no data at all, the sales rank rule decides. Products with no sales rank are rejected.
   ROI = (Amazon price − referral fee − FBA fee − our cost) ÷ our cost, where our cost is the supplier's unit cost times the number of units in the Amazon listing (a 12-pack listing of a single tube costs 12 tubes), using each product's fees from Keepa (15% + $3.50 when Keepa has none).
   Amazon price = the lowest of the buy box, Amazon's own offer and the cheapest FBA offer, so ROI is never overstated.
   Results never expire, so a product is only scanned once. **Refresh prices** re-checks just the products in Kept.
