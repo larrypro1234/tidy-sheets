@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 29
+VERSION = 30
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1244,7 +1244,9 @@ function costColumn(R) {
   const num = R.cols.map((c, j) => j).filter(j => ["number", "currency"].includes(R.cols[j].type));
   const find = re => num.find(j => re.test(cname(R.cols[j])) && !/compar|retail|msrp|amazon|list|\borig\w*|\bwas\b|\bregular\b|\bsrp\b/i.test(cname(R.cols[j])));
   // "Sell Price" / "Offer Price" / "Asking Price" is the supplier's price to you; "Orig Cost" next to it is the old price.
-  const base = find(/\blow ?sell\b/i) ?? find(/\b(sell|selling|offer|asking|special|deal|closeout)\s*(price|cost)\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
+  // A special price filled in for most rows ("Red Dot Special", "Promo", "Sale Price") beats the regular price next to it.
+  const filled = j => j != null && R.rows.filter(r => typeof r.val[j] === "number" && r.val[j] > 0).length >= R.rows.length * 0.5 ? j : undefined;
+  const base = find(/\blow ?sell\b/i) ?? filled(find(/\b(red ?dot|special|promo|promotional|sale|clearance|blowout|discount\w*|markdown)\b/i)) ?? find(/\b(sell|selling|offer|asking|special|deal|closeout)\s*(price|cost)\b/i) ?? find(/\bcost\b|wholesale|\bunit ?(price|cost)\b/i) ?? find(/\bprice\b/i) ?? -1;
   // A price that includes tariff, duty or delivery ("+ Tariff", "Landed") is what you really pay, when it's at least the base price.
   const extra = num.find(j => j !== base && /\b(tariff|tariffs|landed|duty|duties|delivered|freight incl\w*)\b/i.test(cname(R.cols[j])));
   if (base >= 0 && extra != null) {
