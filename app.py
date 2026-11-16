@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 30
+VERSION = 31
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1751,7 +1751,7 @@ function show() {
   };
   // Total qty (units the 300 rule uses) always sits right after the UPC; the quantity column itself is hidden unless it counts cases.
   const QTY = -1, showQty = cur.qj >= 0;
-  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0) && !emptyPicCol(j) && !(showQty && j === cur.qj && cur.pj < 0) && !(amzCols && j === cur.ej));
+  const shownCols = R.cols.map((c, j) => j).filter(j => j !== cur.upj && !(j === cur.idj && cur.upj >= 0 && /\b(id|sku|item|product ?(no|number|#)|part|code)\b|#/i.test(cname(R.cols[j]))) && !emptyPicCol(j) && !(showQty && j === cur.qj && cur.pj < 0) && !(amzCols && j === cur.ej));
   if (showQty) shownCols.unshift(QTY);
   if (cur.upj >= 0) shownCols.unshift(cur.upj);
   const keepScroll = $("#sheet").scrollTop;
