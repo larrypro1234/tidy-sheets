@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 31
+VERSION = 32
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1221,6 +1221,19 @@ function upcDigits(v) {
   const d = groups ? groups[0] : s.replace(/\D/g, "");
   return d.length === 11 ? "0" + d : d;
 }
+// A 14-digit case code ("10023100121847": a packaging digit 1-8, then the unit's code) turns back into the unit's UPC/EAN,
+// which is what Amazon lists. The check digit is worked out again for the shorter code.
+function unitUpc(raw) {
+  const d = String(raw || "");
+  if (!/^[1-8]\d{13}$/.test(d)) return "";
+  const body = d.slice(1, 13);
+  let sum = 0;
+  for (let i = 0; i < body.length; i++) sum += +body[body.length - 1 - i] * (i % 2 ? 1 : 3);
+  const ean = body + ((10 - sum % 10) % 10);
+  return ean[0] === "0" ? ean.slice(1) : ean;
+}
+// A saved Keepa result that means "not on Amazon": [day], or [day, null] once the unit UPC was tried as well.
+const missing = e => e.length === 1 || !e[1];
 const normUpc = v => { const d = upcDigits(v).replace(/^0+/, ""); return d.length >= 6 ? d : ""; };
 // Column names compared with underscores and run-together words split, so "UPC_CD", "AV_QTY" and "UPCCodeList" are recognized.
 const cname = c => String(c.name).replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2");
@@ -1237,7 +1250,7 @@ function amzOf(r) {
   if (!k) return amz.map.size ? 0 : undefined; // no UPC: can't be matched on Amazon
   const e = amz.map.get(k);
   if (!e) return undefined;
-  return e.length === 1 ? 0 : { day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined, count: e.length >= 9 ? e[8] : null, drops30: e.length >= 11 ? e[9] : null, drops90: e.length >= 11 ? e[10] : null };
+  return missing(e) ? 0 : { via: e.length >= 12 ? e[11] : null, day: e[0], asin: e[1], price: e[2], rank: e[3], title: e[4], ref: e.length >= 7 ? e[5] : null, fba: e.length >= 7 ? e[6] : null, sold: e.length >= 8 ? e[7] : undefined, count: e.length >= 9 ? e[8] : null, drops30: e.length >= 11 ? e[9] : null, drops90: e.length >= 11 ? e[10] : null };
 }
 // Your cost per unit: "Low Sell" first, then other cost-like columns (never retail or comparison prices).
 function costColumn(R) {
@@ -1412,11 +1425,13 @@ async function scan(refreshKept) {
   const todo = [], seenK = new Set();
   for (const r of cur.kept) {
     if (bannedBy(r) || isRejected(r)) continue;
-    const raw = upcDigits(r.val[cur.upj]), k = normUpc(raw);
+    const raw = upcDigits(r.val[cur.upj]), k = normUpc(raw), unit = unitUpc(raw);
     if (!k || seenK.has(k)) continue;
     seenK.add(k);
     const e = amz.map.get(k);
-    if (refreshKept ? (e && e.length > 1 && !failReason(r)) : (!e || (e.length > 1 && e.length < 8))) todo.push({ k, raw }); // results never expire; only products never checked (or saved before fees and monthly sales were stored) are fetched
+    // Results never expire; only products never checked (or saved before fees and monthly sales were stored) are fetched,
+    // plus case codes found missing before the app tried their unit UPC.
+    if (refreshKept ? (e && !missing(e) && !failReason(r)) : (!e || (unit && e.length === 1) || (!missing(e) && e.length < 8))) todo.push({ k, raw, unit });
   }
   if (!todo.length) { renderAmzBar(); amzStatus(($("#amzStatus").innerHTML) + " · all up to date"); return; }
   scanning = { stop: false }; renderAmzBar();
@@ -1426,7 +1441,7 @@ async function scan(refreshKept) {
     for (let i = 0; i < todo.length && !scanning.stop; ) {
       const batch = todo.slice(i, i + BATCH);
       amzStatus(`Scanning on Keepa… ${n(done)} of ${n(todo.length)} · ${n(found)} on Amazon${tokens != null ? ` · ${n(tokens)} tokens left` : ""}`);
-      const url = `https://api.keepa.com/product?key=${encodeURIComponent(keepaKey)}&domain=1&history=1&days=365&stats=1&code=${batch.map(b => b.raw).join(",")}`;
+      const url = `https://api.keepa.com/product?key=${encodeURIComponent(keepaKey)}&domain=1&history=1&days=365&stats=1&code=${batch.flatMap(b => b.unit ? [b.raw, b.unit] : [b.raw]).join(",")}`;
       const { status, j } = await keepaGet(url);
       if (!j) throw { code: "unreadable", detail: "HTTP " + status };
       if (typeof j.tokensLeft === "number") tokens = j.tokensLeft;
@@ -1454,7 +1469,11 @@ async function scan(refreshKept) {
         for (const c of codes) if (!hit.has(c)) hit.set(c, entry);
       }
       if (batch.length === 1 && j.products.length && !hit.size) { const p = j.products[0]; hit.set(batch[0].k, [today, p.asin, 0, 0, String(p.title || "").slice(0, 200), null, null, bestMonth(p), listingCount(p), rankDrops(p, 30), rankDrops(p, 90)]); }
-      for (const b of batch) { const e = hit.get(b.k); amzPut(b.k, e || [today]); if (e) found++; }
+      for (const b of batch) {
+        const u = !hit.get(b.k) && b.unit ? hit.get(normUpc(b.unit)) : null;   // the case code isn't on Amazon, but its unit UPC is
+        const e = hit.get(b.k) || (u ? [...u.slice(0, 11), b.unit] : null);
+        amzPut(b.k, e || (b.unit ? [today, null] : [today])); if (e) found++;
+      }
       done += batch.length; i += BATCH;
       show();
       if ((i / BATCH) % 5 === 0) await saveAmazon();
@@ -1713,7 +1732,7 @@ function show() {
     const a = amzOf(r);
     if (!a) return `<td class="more">${a === undefined ? "not checked" : ""}</td><td></td><td></td><td></td><td></td><td></td><td></td>`;
     const e = econ(r), star = e && e.est ? `<span title="Estimated fees: ${EST_REF_PCT}% + $${(EST_FBA / 100).toFixed(2)}">*</span>` : "";
-    return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}${a.rank ? " · Sales rank " + n(a.rank) : ""}">${esc(a.asin)}</a></td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
+    return `<td class="nw"><a href="https://www.amazon.com/dp/${esc(a.asin)}" target="_blank" rel="noopener" title="${esc(a.title)}${a.rank ? " · Sales rank " + n(a.rank) : ""}">${esc(a.asin)}</a>${a.via ? `<span class="sub" title="The supplier's UPC is a case code; Amazon lists the single unit as ${esc(a.via)}">unit UPC ${esc(a.via)}</span>` : ""}</td><td class="n" title="Lowest of buy box, Amazon and FBA offers, checked ${esc(a.day || "")}">${money(a.price)}</td>`
       + (e && e.offer
         ? `<td class="n" title="Pay at most this per unit to make ${Math.round(MIN_ROI * 100)}% ROI (${usd(e.maxListing)} for the whole Amazon listing)"><b>${usd(e.maxUnit)}</b><span class="sub">per unit</span><button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `listing = ${e.mult} units` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button></td>`
         : `<td class="n">${e && e.cost != null ? usd(e.cost) + `<button class="sub packbtn" type="button" data-pack="${esc(a.asin)}" data-mult="${e.mult}" title="Units of this item in one Amazon listing. Click to correct it.">${e.mult > 1 ? `${e.mult} × ${usd(e.unit)}` : "×1"}${packOverrides[a.asin] ? " ✎" : ""}</button>` : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? usd(r.val[cur.cj]) : ""}</td>`)
