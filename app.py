@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 32
+VERSION = 33
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1626,7 +1626,9 @@ function compute() {
   cur.upj = upj;
   cur.cj = cj;
   // The supplier's expiration date ("EXP", "Best By", "BIUB"), shown in place of the sales rank.
-  cur.ej = R.cols.findIndex(c => /\b(exp|expir\w*|exp dt|best ?by|best before|best if used( by)?|bbd|biub|used? by|sell by)\b/i.test(cname(c)));
+  const isFlag = j => { const v = R.rows.map(r => r.val[j]).filter(x => x != null && x !== ""); return v.length > 0 && v.every(x => /^(true|false|yes|no|y|n|0|1)$/i.test(String(x).trim())); };
+  const expCols = R.cols.map((c, j) => j).filter(j => /\b(exp|expir\w*|exp dt|best ?by|best before|best if used( by)?|bbd|biub|used? by|sell by)\b/i.test(cname(R.cols[j])) && !isFlag(j));
+  cur.ej = expCols.find(j => R.cols[j].type === "date") ?? expCols[0] ?? -1;   // "Best By Item" (True/False) is a flag, not the date
 }
 
 /* ---------- remembering products ---------- */
@@ -1987,6 +1989,38 @@ async function pdfSheets(buf, name) {
   }
   return [{ name: name.replace(/\.pdf$/i, "") || "PDF", images: Object.keys(images).length ? images : null, aoa: t.aoa }];
 }
+// Every sheet of a workbook as rows of cells, with the pictures that sit on them.
+function bookSheets(wb, buf) {
+  const pics = buf ? sheetPictures(buf, wb) : {};
+  // Long whole numbers (UPCs stored as numbers) are read in full: Excel may display them as 8.15766E+11, which drops digits.
+  for (const name of wb.SheetNames) {
+    const ws = wb.Sheets[name];
+    for (const addr in ws) {
+      const c = ws[addr];
+      if (addr[0] !== "!" && c && c.t === "n" && Number.isInteger(c.v) && Math.abs(c.v) >= 1e9) c.w = String(c.v);
+    }
+  }
+  const list = wb.SheetNames.map(s => ({ name: s, images: pics[s] || null, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
+  if (!list.length) throw new Error("empty");
+  return list;
+}
+// A copy of an .xlsx whose cell addresses are written in capitals ("a1" becomes "A1"), or null when nothing needed fixing.
+function repairXlsx(buf) {
+  let zip;
+  try { zip = XLSX.CFB.read(new Uint8Array(buf), { type: "array" }); } catch (e) { return null; }
+  let changed = false;
+  const up = v => /^[A-Za-z]{1,3}\d+(:[A-Za-z]{1,3}\d+)?(\s+[A-Za-z]{1,3}\d+(:[A-Za-z]{1,3}\d+)?)*$/.test(v) ? v.toUpperCase() : v;
+  zip.FullPaths.forEach((p, i) => {
+    const f = zip.FileIndex[i];
+    if (!/xl\/worksheets\/[^/]+\.xml$/i.test(p) || !f || !f.content) return;
+    const txt = new TextDecoder().decode(f.content instanceof Uint8Array ? f.content : new Uint8Array(f.content));
+    const fixed = txt.replace(/\s(r|ref|sqref)="([^"]*)"/g, (m, a, v) => ` ${a}="${up(v)}"`);
+    if (fixed !== txt) { f.content = new TextEncoder().encode(fixed); f.size = f.content.length; changed = true; }
+  });
+  if (!changed) return null;
+  const out = XLSX.CFB.write(zip, { fileType: "zip", type: "array" });
+  return out instanceof Uint8Array ? out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength) : new Uint8Array(out).buffer;
+}
 async function loadFile(f) {
   if (!f) return;
   const ext = (f.name.split(".").pop() || "").toLowerCase();
@@ -1994,22 +2028,16 @@ async function loadFile(f) {
   try {
     if (ext === "pdf" || /^%PDF/.test(new TextDecoder().decode(new Uint8Array(await f.slice(0, 5).arrayBuffer())))) {
       try { sheets = await pdfSheets(await f.arrayBuffer(), f.name); } finally { busy(""); }
+    } else if (["csv", "tsv", "txt"].includes(ext)) {
+      sheets = bookSheets(XLSX.read(await f.text(), { type: "string", raw: true }), null);
     } else {
-    const wb = ["csv", "tsv", "txt"].includes(ext)
-      ? XLSX.read(await f.text(), { type: "string", raw: true })
-      : XLSX.read(buf = await f.arrayBuffer(), { type: "array" });
-    const pics = buf ? sheetPictures(buf, wb) : {};
-    // Long whole numbers (UPCs stored as numbers) are read in full: Excel may display them as 8.15766E+11, which drops digits.
-    for (const name of wb.SheetNames) {
-      const ws = wb.Sheets[name];
-      for (const addr in ws) {
-        const c = ws[addr];
-        if (addr[0] !== "!" && c && c.t === "n" && Number.isInteger(c.v) && Math.abs(c.v) >= 1e9) c.w = String(c.v);
+      buf = await f.arrayBuffer();
+      try { sheets = bookSheets(XLSX.read(buf, { type: "array" }), buf); }
+      catch (e) {
+        const fixed = repairXlsx(buf);   // some exports write cell addresses in lowercase ("a1"), which Excel forgives
+        if (!fixed) throw e;
+        sheets = bookSheets(XLSX.read(fixed, { type: "array" }), fixed);
       }
-    }
-    const list = wb.SheetNames.map(s => ({ name: s, images: pics[s] || null, aoa: XLSX.utils.sheet_to_json(wb.Sheets[s], { header: 1, raw: false, defval: null, blankrows: true, dateNF: "yyyy-mm-dd" }) })).filter(s => s.aoa.length);
-    if (!list.length) throw new Error("empty");
-    sheets = list;
     }
     active = 0; fileName = f.name; prefix = filePrefix(f.name); view = "kept"; uploadDay = localDay();
   } catch (e) {
