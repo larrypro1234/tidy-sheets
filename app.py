@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-VERSION = 33
+VERSION = 34
 UPDATE_URL = "https://raw.githubusercontent.com/larrypro1234/tidy-sheets/main/app.py"
 DATA_DIR = Path.home() / "TidySheetsData"
 DB_PATH = DATA_DIR / "tidy.db"
@@ -1108,6 +1108,13 @@ async function openSetup(note) {
   $("#catSetup").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function rowByKey(k) { return cur && cur.R.rows.find(r => keyOf(r) === k); }
+// A best-by date the way the catalog writes it ("05/31/27"), or NA.
+function postExp(v) {
+  if (v == null || v === "") return "NA";
+  const s = String(v).trim(), m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return `${m[2]}/${m[3]}/${m[1].slice(2)}`;
+  return /^(no|none|n\/?a)\b/i.test(s) ? "NA" : s;
+}
 async function openPost(k) {
   await catalogReady;
   if (!catalog.url) return openSetup("Connect your catalog first. After that, the Post button sends products straight to it.");
@@ -1120,7 +1127,12 @@ async function openPost(k) {
   const ec = econ(r);
   $("#pInfo").textContent = [ec && ec.offer ? "Max offer $" + ec.maxUnit.toFixed(2) + "/unit" : cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? "Our cost $" + r.val[cur.cj].toFixed(2) : "", a && a.price ? "Amazon $" + (a.price / 100).toFixed(2) : "", a && a.asin ? a.asin : ""].filter(Boolean).join(" · ");
   $("#pBrand").value = brandCol >= 0 && r.val[brandCol] ? String(r.val[brandCol]) : "";
-  $("#pPrice").value = ""; $("#pMoq").value = ""; $("#pExp").value = "NA";
+  // Filled in from the row: our cost per unit, the total qty and the best-by date (all can still be changed).
+  const unitCost = cur.cj >= 0 && typeof r.val[cur.cj] === "number" ? r.val[cur.cj] : null;
+  const qty = cur.units(r);
+  $("#pPrice").value = unitCost != null ? unitCost.toFixed(2) : "";
+  $("#pMoq").value = typeof qty === "number" && qty > 0 ? String(Math.round(qty)) : "";
+  $("#pExp").value = postExp(cur.ej >= 0 && r.val[cur.ej] != null ? fmt(r.val[cur.ej], R.cols[cur.ej]) : null);   // as shown in the table, e.g. 2027-05-31
   $("#pUpc").value = raw.length === 11 ? "0" + raw : raw;
   $("#pImg").hidden = true; $("#pImg").removeAttribute("src"); $("#pImg").dataset.url = "";
   $("#pGo").disabled = false; $("#pStatus").textContent = "";
